@@ -11,14 +11,15 @@ wss.on("connection", function connection(ws) {
       console.log("Mensaje binario recibido y descartado.");
       return;
     }
-    console.log("Mensaje recibido:", message.toString());
+    // Si el mensaje es un Buffer, conviértelo a string
+    const texto = typeof message === "string" ? message : message.toString();
+    console.log("Mensaje recibido:", texto);
     console.log("Haciendo broadcast a", wss.clients.size, "clientes.");
 
-   
+    // BROADCAST como texto puro (no Buffer)
     wss.clients.forEach(function each(client) {
       if (client.readyState === WebSocket.OPEN) {
-        client.send(message);
-
+        client.send(texto); // Forzamos que siempre sea texto
       }
     });
   });
