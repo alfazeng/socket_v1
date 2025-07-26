@@ -4,18 +4,27 @@ const port = process.env.PORT || 8080;
 const wss = new WebSocket.Server({ port });
 
 wss.on("connection", function connection(ws) {
-  console.log("Nuevo cliente conectado");
+  console.log("Nuevo cliente conectado. Clientes activos:", wss.clients.size);
+
   ws.on("message", function incoming(message, isBinary) {
-    if (isBinary) return;
-    
+    if (isBinary) {
+      console.log("Mensaje binario recibido y descartado.");
+      return;
+    }
+    console.log("Mensaje recibido:", message.toString());
+    console.log("Haciendo broadcast a", wss.clients.size, "clientes.");
+
+   
     wss.clients.forEach(function each(client) {
       if (client.readyState === WebSocket.OPEN) {
-        client.send(message); 
+        client.send(message);
+
       }
     });
   });
+
   ws.on("close", function () {
-    console.log("Cliente desconectado");
+    console.log("Cliente desconectado. Clientes activos:", wss.clients.size);
   });
 });
 
