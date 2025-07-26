@@ -5,20 +5,11 @@ const wss = new WebSocket.Server({ port });
 
 wss.on("connection", function connection(ws) {
   console.log("Nuevo cliente conectado");
-
   ws.on("message", function incoming(message, isBinary) {
-    if (isBinary) {
-      console.log("Mensaje binario recibido y descartado.");
-      return;
-    }
-    
-    wss.clients.forEach(function each(client) {
-      if (client.readyState === WebSocket.OPEN) {
-        client.send(message); 
-      }
-    });
+    if (isBinary) return;
+    // Solo responde al remitente ("eco")
+    ws.send("Echo: " + message.toString());
   });
-
   ws.on("close", function () {
     console.log("Cliente desconectado");
   });
