@@ -1,7 +1,6 @@
-// server.js
 const WebSocket = require('ws');
 
-// Render te asigna el puerto en process.env.PORT
+// Render asigna el puerto automáticamente
 const port = process.env.PORT || 8080;
 const wss = new WebSocket.Server({ port });
 
@@ -10,8 +9,13 @@ wss.on('connection', function connection(ws) {
 
   ws.on('message', function incoming(message) {
     console.log('Mensaje recibido:', message);
-    // Eco: envía de vuelta el mensaje al cliente
-    ws.send(`Echo: ${message}`);
+
+    // Reenviar el mensaje a TODOS los clientes conectados (broadcast)
+    wss.clients.forEach(function each(client) {
+      if (client.readyState === WebSocket.OPEN) {
+        client.send(message);
+      }
+    });
   });
 
   ws.on('close', function() {
