@@ -1,32 +1,106 @@
 const WebSocket = require("ws");
 
-const port = process.env.PORT || 8080;
-const wss = new WebSocket.Server({ port });
+const PORT = process.env.PORT || 10000;
+const wss = new WebSocket.Server({ port: PORT });
 
-wss.on("connection", function connection(ws) {
-  console.log("Nuevo cliente conectado. Clientes activos:", wss.clients.size);
+/**
+ * Mapa de conexiones: userId => ws
+ */
+const conexiones = new Map();
 
-  ws.on("message", function incoming(message, isBinary) {
-    if (isBinary) {
-      console.log("Mensaje binario recibido y descartado.");
-      return;
-    }
-    // Si el mensaje es un Buffer, conviértelo a string
-    const texto = typeof message === "string" ? message : message.toString();
-    console.log("Mensaje recibido:", texto);
-    console.log("Haciendo broadcast a", wss.clients.size, "clientes.");
+console.log("WebSocket server iniciado en puerto:", PORT);
 
-    // BROADCAST como texto puro (no Buffer)
-    wss.clients.forEach(function each(client) {
-      if (client.readyState === WebSocket.OPEN) {
-        client.send(texto); // Forzamos que siempre sea texto
-      }
-    });
+wss.on("connection", (ws, req) => {
+  ws.isAlive = true;
+
+  ws.on("pong", () => {
+    ws.isAlive = true;
   });
 
-  ws.on("close", function () {
-    console.log("Cliente desconectado. Clientes activos:", wss.clients.size);
+  ws.on("message", (msgRaw) => {
+    try {
+      const msg = JSON.parse(msgRaw);
+
+      // Primer mensaje: autenticación/identificación
+      if (msg.type === "identificacion" && msg.userId) {
+        ws.userId = msg.userId;
+        conexiones.set(ws.userId, ws);
+        console.log(`Usuario conectado: ${ws.userId}`);
+        ws.send(
+          JSON.stringify({
+            type: "status",
+            msg: "identificado",
+            userId: ws.userId,
+          })
+        );
+        return;
+      }
+
+      // Mensaje normal P2P: {type: "mensaje", from, to, msg}
+      if (msg.type === "mensaje" && msg.from && msg.to && msg.msg) {
+        // Opcional: persistir en tu BD aquí
+        // ...
+
+        // Si el destinatario está online, mándale el mensaje
+        const receptor = conexiones.get(msg.to);
+        if (receptor && receptor.readyState === WebSocket.OPEN) {
+          receptor.send(
+            JSON.stringify({
+              type: "mensaje",
+              from: msg.from,
+              msg: msg.msg,
+              fecha: new Date().toISOString(),
+            })
+          );
+        }
+        // Confirmación local al emisor
+        ws.send(
+          JSON.stringify({
+            type: "enviado",
+            to: msg.to,
+            msg: msg.msg,
+            fecha: new Date().toISOString(),
+          })
+        );
+        return;
+      }
+
+      // (Opcional) Soporte para "escribiendo", "en línea", etc
+      if (msg.type === "typing" && msg.from && msg.to) {
+        const receptor = conexiones.get(msg.to);
+        if (receptor && receptor.readyState === WebSocket.OPEN) {
+          receptor.send(
+            JSON.stringify({
+              type: "typing",
+              from: msg.from,
+            })
+          );
+        }
+      }
+    } catch (err) {
+      ws.send(
+        JSON.stringify({ type: "error", msg: "Formato de mensaje inválido." })
+      );
+    }
+  });
+
+  ws.on("close", () => {
+    if (ws.userId) {
+      conexiones.delete(ws.userId);
+      console.log(`Usuario desconectado: ${ws.userId}`);
+    }
+  });
+
+  ws.on("error", (err) => {
+    console.error("WebSocket error:", err);
   });
 });
 
-console.log("WebSocket server running on port", port);
+// Mantener conexiones vivas (para Render y otros hosts cloud)
+setInterval(() => {
+  wss.clients.forEach((ws) => {
+    if (!ws.isAlive) return ws.terminate();
+    ws.isAlive = false;
+    ws.ping(() => {});
+  });
+}, 30000);
