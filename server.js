@@ -70,10 +70,12 @@ wss.on("connection", (ws, req) => {
               JSON.stringify({
                 type: "error",
                 msg: "No se pudo guardar el mensaje",
+                detalle: err.message, // <-- Esto te da la causa exacta
               })
             );
             return;
           }
+          
 
           // Si el destinatario está online, mándale el mensaje en tiempo real
           const receptor = conexiones.get(msg.to);
