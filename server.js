@@ -1,5 +1,19 @@
 const WebSocket = require("ws");
+const mysql = require("mysql2/promise");
 
+// --- CONFIGURACIÓN MYSQL PRODUCCIÓN ---
+const db = mysql.createPool({
+  host: "188.127.239.143",
+  user: "ceres",
+  password: "alfa1260",
+  database: "chat_cerex_db",
+  charset: "utf8mb4",
+  waitForConnections: true,
+  connectionLimit: 10,
+  queueLimit: 0,
+});
+
+// --- CONFIGURACIÓN WEBSOCKET ---
 const PORT = process.env.PORT || 10000;
 const wss = new WebSocket.Server({ port: PORT });
 
@@ -21,7 +35,7 @@ wss.on("connection", (ws, req) => {
     try {
       const msg = JSON.parse(msgRaw);
 
-      // Primer mensaje: autenticación/identificación
+      // --- IDENTIFICACIÓN DE USUARIO ---
       if (msg.type === "identificacion" && msg.userId) {
         ws.userId = msg.userId;
         conexiones.set(ws.userId, ws);
@@ -36,36 +50,60 @@ wss.on("connection", (ws, req) => {
         return;
       }
 
-      // Mensaje normal P2P: {type: "mensaje", from, to, msg}
-      if (msg.type === "mensaje" && msg.from && msg.to && msg.msg) {
-        // Opcional: persistir en tu BD aquí
-        // ...
+      // --- MENSAJE P2P CON PERSISTENCIA ---
+      if (
+        msg.type === "mensaje" &&
+        msg.from &&
+        msg.to &&
+        msg.msg &&
+        msg.chat_id
+      ) {
+        (async () => {
+          try {
+            await db.execute(
+              "INSERT INTO mensajes (chat_id, de_id, mensaje, fecha) VALUES (?, ?, ?, NOW())",
+              [msg.chat_id, msg.from, msg.msg]
+            );
+          } catch (err) {
+            console.error("Error guardando mensaje en BD:", err);
+            ws.send(
+              JSON.stringify({
+                type: "error",
+                msg: "No se pudo guardar el mensaje",
+              })
+            );
+            return;
+          }
 
-        // Si el destinatario está online, mándale el mensaje
-        const receptor = conexiones.get(msg.to);
-        if (receptor && receptor.readyState === WebSocket.OPEN) {
-          receptor.send(
+          // Si el destinatario está online, mándale el mensaje en tiempo real
+          const receptor = conexiones.get(msg.to);
+          if (receptor && receptor.readyState === WebSocket.OPEN) {
+            receptor.send(
+              JSON.stringify({
+                type: "mensaje",
+                from: msg.from,
+                chat_id: msg.chat_id,
+                msg: msg.msg,
+                fecha: new Date().toISOString(),
+              })
+            );
+          }
+
+          // Confirmación local al emisor
+          ws.send(
             JSON.stringify({
-              type: "mensaje",
-              from: msg.from,
+              type: "enviado",
+              to: msg.to,
+              chat_id: msg.chat_id,
               msg: msg.msg,
               fecha: new Date().toISOString(),
             })
           );
-        }
-        // Confirmación local al emisor
-        ws.send(
-          JSON.stringify({
-            type: "enviado",
-            to: msg.to,
-            msg: msg.msg,
-            fecha: new Date().toISOString(),
-          })
-        );
+        })();
         return;
       }
 
-      // (Opcional) Soporte para "escribiendo", "en línea", etc
+      // --- "ESCRIBIENDO" U OTROS EVENTOS (Opcional) ---
       if (msg.type === "typing" && msg.from && msg.to) {
         const receptor = conexiones.get(msg.to);
         if (receptor && receptor.readyState === WebSocket.OPEN) {
@@ -76,7 +114,16 @@ wss.on("connection", (ws, req) => {
             })
           );
         }
+        return;
       }
+
+      // --- MENSAJE NO RECONOCIDO ---
+      ws.send(
+        JSON.stringify({
+          type: "error",
+          msg: "Formato de mensaje inválido o tipo no reconocido.",
+        })
+      );
     } catch (err) {
       ws.send(
         JSON.stringify({ type: "error", msg: "Formato de mensaje inválido." })
@@ -96,7 +143,7 @@ wss.on("connection", (ws, req) => {
   });
 });
 
-// Mantener conexiones vivas (para Render y otros hosts cloud)
+// --- PING/PONG PARA MANTENER CONEXIONES VIVAS EN PRODUCCIÓN ---
 setInterval(() => {
   wss.clients.forEach((ws) => {
     if (!ws.isAlive) return ws.terminate();
