@@ -70,7 +70,7 @@ wss.on("connection", (ws, req) => {
               JSON.stringify({
                 type: "error",
                 msg: "No se pudo guardar el mensaje",
-                detalle: err.message, // <-- Esto te da la causa exacta
+                detalle: err.message, 
               })
             );
             return;
