@@ -1,14 +1,13 @@
 {
-    "name": "render-ws-test",
-    "version": "1.0.0",
-    "main": "server.js",
-    "scripts": {
-      "start": "node server.js"
-    },
-    "dependencies": {
-      "mysql2": "^3.14.3",
-      "ws": "^8.18.3",
-      "web-push": "^3.6.5"
-    }
+  "name": "render-ws-test",
+  "version": "1.0.0",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "ws": "^8.18.3",
+    "web-push": "^3.6.5",
+    "node-fetch": "^2.6.7"
   }
-  
+}
