@@ -1,5 +1,16 @@
 const WebSocket = require("ws");
 const mysql = require("mysql2/promise");
+const webpush = require("web-push");
+
+// --- CLAVES VAPID (pon las tuyas aquí) ---
+const VAPID_PUBLIC_KEY =
+  "BKk3imcvxH5Wdz2k7O8-E3-mAM73dDLbIueqvVYuSVLNsUCEAfvtNhdG_2DFYXHihC2LvCfzSdEH3oudEjF3vjY";
+const VAPID_PRIVATE_KEY = "Co3e5xGt6GM5zRREBPcgoSH1DhW6pF8ej95Ysv7d6YI";
+webpush.setVapidDetails(
+  "mailto:chatcerexapp@chatcerexapp.com",
+  VAPID_PUBLIC_KEY,
+  VAPID_PRIVATE_KEY
+);
 
 // --- CONFIGURACIÓN MYSQL PRODUCCIÓN ---
 const db = mysql.createPool({
@@ -13,13 +24,9 @@ const db = mysql.createPool({
   queueLimit: 0,
 });
 
-// --- CONFIGURACIÓN WEBSOCKET ---
+// --- WEBSOCKET ---
 const PORT = process.env.PORT || 10000;
 const wss = new WebSocket.Server({ port: PORT });
-
-/**
- * Mapa de conexiones: userId => ws
- */
 const conexiones = new Map();
 
 console.log("WebSocket server iniciado en puerto:", PORT);
@@ -34,6 +41,21 @@ wss.on("connection", (ws, req) => {
   ws.on("message", (msgRaw) => {
     try {
       const msg = JSON.parse(msgRaw);
+
+      // --- RECIBIR SUSCRIPCIÓN PUSH DESDE EL FRONTEND ---
+      if (msg.type === "registrar_push" && msg.userId && msg.subscription) {
+        // Guarda o actualiza la suscripción para el usuario
+        (async () => {
+          const { endpoint, keys } = msg.subscription;
+          await db.execute(
+            `REPLACE INTO suscripciones_push (usuario_id, endpoint, p256dh, auth)
+             VALUES (?, ?, ?, ?)`,
+            [msg.userId, endpoint, keys.p256dh, keys.auth]
+          );
+          ws.send(JSON.stringify({ type: "push_registrada", ok: true }));
+        })();
+        return;
+      }
 
       // --- IDENTIFICACIÓN DE USUARIO ---
       if (msg.type === "identificacion" && msg.userId) {
@@ -50,7 +72,7 @@ wss.on("connection", (ws, req) => {
         return;
       }
 
-      // --- MENSAJE P2P CON PERSISTENCIA ---
+      // --- MENSAJE P2P CON PERSISTENCIA Y NOTIFICACIÓN PUSH ---
       if (
         msg.type === "mensaje" &&
         msg.from &&
@@ -70,12 +92,11 @@ wss.on("connection", (ws, req) => {
               JSON.stringify({
                 type: "error",
                 msg: "No se pudo guardar el mensaje",
-                detalle: err.message, 
+                detalle: err.message,
               })
             );
             return;
           }
-          
 
           // Si el destinatario está online, mándale el mensaje en tiempo real
           const receptor = conexiones.get(msg.to);
@@ -89,6 +110,32 @@ wss.on("connection", (ws, req) => {
                 fecha: new Date().toISOString(),
               })
             );
+          } else {
+            // Si está offline, manda notificación push (si tiene suscripción guardada)
+            try {
+              const [rows] = await db.execute(
+                "SELECT endpoint, p256dh, auth FROM suscripciones_push WHERE usuario_id = ? ORDER BY id DESC LIMIT 1",
+                [msg.to]
+              );
+              if (rows.length) {
+                const suscripcion = {
+                  endpoint: rows[0].endpoint,
+                  keys: {
+                    p256dh: rows[0].p256dh,
+                    auth: rows[0].auth,
+                  },
+                };
+                const payload = JSON.stringify({
+                  title: "Nuevo mensaje de Chat Cerex",
+                  body: msg.msg,
+                  icon: "/img/logo_principal_chatcerex.png",
+                });
+                await webpush.sendNotification(suscripcion, payload);
+                console.log("Notificación push enviada a usuario", msg.to);
+              }
+            } catch (err) {
+              console.error("Error enviando push:", err);
+            }
           }
 
           // Confirmación local al emisor
@@ -119,7 +166,6 @@ wss.on("connection", (ws, req) => {
         return;
       }
 
-      // --- MENSAJE NO RECONOCIDO ---
       ws.send(
         JSON.stringify({
           type: "error",
@@ -145,7 +191,6 @@ wss.on("connection", (ws, req) => {
   });
 });
 
-// --- PING/PONG PARA MANTENER CONEXIONES VIVAS EN PRODUCCIÓN ---
 setInterval(() => {
   wss.clients.forEach((ws) => {
     if (!ws.isAlive) return ws.terminate();
