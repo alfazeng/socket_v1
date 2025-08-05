@@ -128,8 +128,10 @@ wss.on("connection", (ws, req) => {
                 const payload = JSON.stringify({
                   title: "Nuevo mensaje de Chat Cerex",
                   body: msg.msg,
-                  icon: "/img/logo_principal_chatcerex.png",
+                  icon: "https://chatcerexapp.com/img/logo_principal_chatcerex.png", 
+                  url: "https://chatcerexapp.com/dashboard.php", 
                 });
+                
                 await webpush.sendNotification(suscripcion, payload);
                 console.log("Notificación push enviada a usuario", msg.to);
               }
