@@ -1,7 +1,8 @@
-// server.js (versión API intermedia)
+
 const WebSocket = require("ws");
 const webpush = require("web-push");
-const fetch = require("node-fetch"); 
+const http = require("http");
+const { Client } = require("pg");
 
 // --- CLAVES VAPID ---
 const VAPID_PUBLIC_KEY =
@@ -13,14 +14,39 @@ webpush.setVapidDetails(
   VAPID_PRIVATE_KEY
 );
 
-const API_URL = "https://www.chatcerexapp.com/api/api_ws.php";
-const API_KEY = "cerex_secret_key";
+// <-- Nuevo: Conexión a la base de datos
+const client = new Client({
+  connectionString: process.env.DATABASE_URL,
+  ssl: {
+    rejectUnauthorized: false,
+  },
+});
+
+client
+  .connect()
+  .then(() => console.log("Conectado a la base de datos PostgreSQL"))
+  .catch((err) => console.error("Error de conexión a la DB:", err.stack));
 
 const PORT = process.env.PORT || 10000;
-const wss = new WebSocket.Server({ port: PORT });
 const conexiones = new Map();
 
-console.log("WebSocket server iniciado en puerto:", PORT);
+// <-- Se crea un servidor HTTP para las peticiones de Render
+const server = http.createServer((req, res) => {
+  if (req.url === "/") {
+    res.writeHead(200, { "Content-Type": "text/plain" });
+    res.end("WebSocket server is running.");
+  } else {
+    res.writeHead(404);
+    res.end();
+  }
+});
+
+// <-- Se asocia el servidor de WebSocket con el servidor HTTP
+const wss = new WebSocket.Server({ server });
+
+server.listen(PORT, () => {
+  console.log("WebSocket server iniciado en puerto:", PORT);
+});
 
 wss.on("connection", (ws) => {
   ws.isAlive = true;
@@ -33,20 +59,14 @@ wss.on("connection", (ws) => {
 
       // --- REGISTRAR PUSH ---
       if (msg.type === "registrar_push" && msg.userId && msg.subscription) {
-        await fetch(API_URL, {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            "X-Api-Key": API_KEY,
-          },
-          body: JSON.stringify({
-            accion: "registrar_push",
-            usuario_id: msg.userId,
-            endpoint: msg.subscription.endpoint,
-            p256dh: msg.subscription.keys.p256dh,
-            auth: msg.subscription.keys.auth,
-          }),
-        });
+        const { endpoint, keys } = msg.subscription;
+        await client.query(
+          `INSERT INTO push_subscriptions (usuario_id, endpoint, p256dh, auth) 
+           VALUES ($1, $2, $3, $4) ON CONFLICT (usuario_id) DO UPDATE SET 
+           endpoint = $2, p256dh = $3, auth = $4`,
+          [msg.userId, endpoint, keys.p256dh, keys.auth]
+        );
+
         ws.send(JSON.stringify({ type: "push_registrada", ok: true }));
         return;
       }
@@ -66,7 +86,8 @@ wss.on("connection", (ws) => {
         return;
       }
 
-      // --- MENSAJE P2P CON API ---
+      // --- MENSAJE P2P ---
+      // --- MENSAJE P2P ---
       if (
         msg.type === "mensaje" &&
         msg.from &&
@@ -74,85 +95,75 @@ wss.on("connection", (ws) => {
         msg.msg &&
         msg.chat_id
       ) {
-        // Guarda mensaje en la API
-        await fetch(API_URL, {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            "X-Api-Key": API_KEY,
-          },
-          body: JSON.stringify({
-            accion: "guardar_mensaje",
-            chat_id: msg.chat_id,
-            de_id: msg.from,
-            mensaje: msg.msg,
-          }),
-        });
-
-        // Si receptor está online, entrega en tiempo real
-        const receptor = conexiones.get(msg.to);
-        if (receptor && receptor.readyState === WebSocket.OPEN) {
-          receptor.send(
-            JSON.stringify({
-              type: "mensaje",
-              from: msg.from,
-              chat_id: msg.chat_id,
-              msg: msg.msg,
-              fecha: new Date().toISOString(),
-            })
+        try {
+          const result = await client.query(
+            // <-- CAMBIO AQUÍ: Se agrega la columna 'para_id' a la consulta
+            `INSERT INTO mensajes (chat_id, de_id, para_id, mensaje, fecha) 
+       VALUES ($1, $2, $3, $4, NOW()) RETURNING fecha`,
+            // <-- CAMBIO AQUÍ: Se agrega msg.to a los parámetros
+            [msg.chat_id, msg.from, msg.to, msg.msg]
           );
-        } else {
-          // Si offline, busca su push y notifícalo
-          const resPush = await fetch(API_URL, {
-            method: "POST",
-            headers: {
-              "Content-Type": "application/json",
-              "X-Api-Key": API_KEY,
-            },
-            body: JSON.stringify({
-              accion: "obtener_push",
-              usuario_id: msg.to,
-            }),
-          });
-          const datosPush = await resPush.json();
-          if (datosPush && datosPush.endpoint) {
-            const payload = JSON.stringify({
-              title: "Nuevo mensaje de Chat Cerex",
-              body: msg.msg,
-              icon: "https://chatcerexapp.com/img/logo_principal_chatcerex.png",
-              url: "https://chatcerexapp.com/dashboard.php",
-            });
-            try {
-              await webpush.sendNotification(
-                {
-                  endpoint: datosPush.endpoint,
-                  keys: {
-                    p256dh: datosPush.p256dh,
-                    auth: datosPush.auth,
+
+          const fechaMensaje = result.rows[0].fecha;
+
+          const receptor = conexiones.get(msg.to);
+          if (receptor && receptor.readyState === WebSocket.OPEN) {
+            receptor.send(
+              JSON.stringify({
+                type: "mensaje",
+                from: msg.from,
+                chat_id: msg.chat_id,
+                msg: msg.msg,
+                fecha: fechaMensaje,
+              })
+            );
+          } else {
+            const resPush = await client.query(
+              `SELECT endpoint, p256dh, auth FROM push_subscriptions WHERE usuario_id = $1`,
+              [msg.to]
+            );
+            const datosPush = resPush.rows[0];
+
+            if (datosPush && datosPush.endpoint) {
+              const payload = JSON.stringify({
+                title: "Nuevo mensaje de Chat Cerex",
+                body: msg.msg,
+                icon: "https://chatcerexapp.com/img/logo_principal_chatcerex.png",
+                url: "https://chatcerexapp.com/dashboard.php",
+              });
+              try {
+                await webpush.sendNotification(
+                  {
+                    endpoint: datosPush.endpoint,
+                    keys: {
+                      p256dh: datosPush.p256dh,
+                      auth: datosPush.auth,
+                    },
                   },
-                },
-                payload
-              );
-              console.log("Push enviado a usuario", msg.to);
-            } catch (err) {
-              console.error("Error enviando push:", err);
+                  payload
+                );
+                console.log("Push enviado a usuario", msg.to);
+              } catch (err) {
+                console.error("Error enviando push:", err);
+              }
             }
           }
-        }
 
-        // Confirmación al emisor
-        ws.send(
-          JSON.stringify({
-            type: "enviado",
-            to: msg.to,
-            chat_id: msg.chat_id,
-            msg: msg.msg,
-            fecha: new Date().toISOString(),
-          })
-        );
+          ws.send(
+            JSON.stringify({
+              type: "enviado",
+              to: msg.to,
+              chat_id: msg.chat_id,
+              msg: msg.msg,
+              fecha: fechaMensaje,
+            })
+          );
+        } catch (dbErr) {
+          console.error("Error al guardar mensaje en la DB:", dbErr);
+          ws.send(JSON.stringify({ type: "error", msg: "Error de servidor." }));
+        }
         return;
       }
-
       // --- TYPING EVENT ---
       if (msg.type === "typing" && msg.from && msg.to) {
         const receptor = conexiones.get(msg.to);
