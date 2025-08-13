@@ -72,9 +72,9 @@ app.post("/api/chats", authenticateToken, async (req, res) => {
   try {
     const existingChat = await pool.query(
       `SELECT c.id FROM chats c
-       JOIN chat_members cm1 ON c.id = cm1.chat_id
-       JOIN chat_members cm2 ON c.id = cm2.chat_id
-       WHERE cm1.user_id = $1 AND cm2.user_id = $2`,
+        JOIN chat_members cm1 ON c.id = cm1.chat_id
+        JOIN chat_members cm2 ON c.id = cm2.chat_id
+        WHERE cm1.user_id = $1 AND cm2.user_id = $2`,
       [senderId, recipient_id]
     );
 
@@ -117,9 +117,9 @@ app.get("/api/chats/:chatId/messages", authenticateToken, async (req, res) => {
 
     const messages = await pool.query(
       `SELECT m.id, m.mensaje AS msg, m.de_id AS from, m.fecha
-       FROM mensajes m
-       WHERE m.chat_id = $1
-       ORDER BY m.fecha ASC`,
+        FROM mensajes m
+        WHERE m.chat_id = $1
+        ORDER BY m.fecha ASC`,
       [chatId]
     );
 
@@ -150,7 +150,27 @@ wss.on("connection", (ws) => {
 
       // --- REGISTRAR PUSH ---
       if (msg.type === "registrar_push" && msg.userId && msg.subscription) {
-        // ... (código existente) ...
+        const userId = msg.userId;
+        const subscription = msg.subscription;
+        const client = await pool.connect();
+        try {
+          // Primero, intenta actualizar el registro
+          const updateResult = await client.query(
+            "UPDATE push_subscriptions SET subscription = $1 WHERE user_id = $2 RETURNING *",
+            [JSON.stringify(subscription), userId]
+          );
+
+          if (updateResult.rows.length === 0) {
+            // Si no hay filas actualizadas, inserta un nuevo registro
+            await client.query(
+              "INSERT INTO push_subscriptions (user_id, subscription) VALUES ($1, $2)",
+              [userId, JSON.stringify(subscription)]
+            );
+          }
+          console.log("Suscripción a notificaciones push registrada para:", userId);
+        } finally {
+          client.release();
+        }
       }
 
       // --- IDENTIFICAR USUARIO ---
@@ -176,33 +196,62 @@ wss.on("connection", (ws) => {
         msg.msg &&
         msg.chat_id
       ) {
+        // AÑADIDO: Verificamos que el emisor del mensaje sea el mismo que el usuario de la conexión
+        if (msg.from !== ws.userId) {
+          ws.send(
+            JSON.stringify({
+              type: "error",
+              msg: "No puedes enviar un mensaje en nombre de otro usuario.",
+            })
+          );
+          return;
+        }
+
         try {
           const result = await pool.query(
-            // <-- Usamos pool.query
-            `INSERT INTO mensajes (chat_id, de_id, para_id, mensaje, fecha) 
-            VALUES ($1, $2, $3, $4, NOW()) RETURNING fecha`,
+            `INSERT INTO mensajes (chat_id, de_id, para_id, mensaje, fecha) VALUES ($1, $2, $3, $4, NOW()) RETURNING fecha`,
             [msg.chat_id, msg.from, msg.to, msg.msg]
           );
 
           const fechaMensaje = result.rows[0].fecha;
 
+          // Mensaje para el RECEPTOR
           const receptor = conexiones.get(msg.to);
           if (receptor && receptor.readyState === WebSocket.OPEN) {
             receptor.send(
               JSON.stringify({
                 type: "mensaje",
                 from: msg.from,
+                to: msg.to,
                 chat_id: msg.chat_id,
                 msg: msg.msg,
                 fecha: fechaMensaje,
               })
             );
           } else {
-            // ... (lógica de push notification) ...
+            const subscriptionResult = await pool.query(
+              "SELECT subscription FROM push_subscriptions WHERE user_id = $1",
+              [msg.to]
+            );
+            const subscription = subscriptionResult.rows[0]?.subscription;
+            if (subscription) {
+              const payload = JSON.stringify({
+                title: "Nuevo mensaje",
+                body: `De: ${msg.from} - ${msg.msg}`,
+              });
+              webpush
+                .sendNotification(JSON.parse(subscription), payload)
+                .catch((err) =>
+                  console.error("Error al enviar notificación push:", err)
+                );
+            }
           }
+          
+          // Mensaje de confirmación para el EMISOR
           ws.send(
             JSON.stringify({
               type: "enviado",
+              from: msg.from,
               to: msg.to,
               chat_id: msg.chat_id,
               msg: msg.msg,
@@ -218,12 +267,16 @@ wss.on("connection", (ws) => {
 
       // --- TYPING EVENT ---
       if (msg.type === "typing" && msg.from && msg.to) {
+        if (msg.from !== ws.userId) {
+          return;
+        }
         const receptor = conexiones.get(msg.to);
         if (receptor && receptor.readyState === WebSocket.OPEN) {
           receptor.send(
             JSON.stringify({
               type: "typing",
               from: msg.from,
+              to: msg.to,
             })
           );
         }
