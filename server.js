@@ -18,12 +18,10 @@ webpush.setVapidDetails(
   VAPID_PRIVATE_KEY
 );
 
-// --- Conexión a la base de datos con Pool para múltiples conexiones ---
+// --- Conexión a la base de datos ---
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
-  ssl: {
-    rejectUnauthorized: false,
-  },
+  ssl: { rejectUnauthorized: false },
 });
 
 pool
@@ -39,12 +37,12 @@ const conexiones = new Map();
 app.use(cors());
 app.use(express.json());
 
-// --- Middleware de Autenticación (para endpoints de API) ---
+// --- Middleware de autenticación JWT ---
 const authenticateToken = (req, res, next) => {
   const authHeader = req.headers.authorization;
   const token = authHeader && authHeader.split(" ")[1];
 
-  if (token == null) return res.sendStatus(401);
+  if (!token) return res.sendStatus(401);
 
   jwt.verify(token, JWT_SECRET, (err, user) => {
     if (err) return res.sendStatus(403);
@@ -53,20 +51,12 @@ const authenticateToken = (req, res, next) => {
   });
 };
 
-// --- ENDPOINTS DE API REST ---
-
-// Endpoint raíz para verificar que el servidor está corriendo
+// --- Endpoint raíz ---
 app.get("/", (req, res) => {
   res.send("WebSocket and Express server is running.");
 });
 
-// --- REMOVIDO: LÓGICA DE CHAT BASADA EN TABLA INTERMEDIA (chat_members) ---
-// Se elimina el antiguo endpoint POST /api/chats porque el chat se define ahora
-// por los IDs de los usuarios y se gestiona al enviar el primer mensaje.
-
-// --- CAMBIO: LÓGICA DE CHAT ALINEADA CON GO ---
-// Endpoint para obtener el historial de mensajes de un chat
-// Ahora "chatId" en la URL representa el ID del otro usuario
+// --- Obtener historial de mensajes ---
 app.get(
   "/api/chats/:otherUserId/messages",
   authenticateToken,
@@ -75,14 +65,12 @@ app.get(
     const currentUserId = req.user.id;
 
     try {
-      // La consulta ahora busca mensajes directamente entre el usuario actual y el otro usuario,
-      // usando la nueva tabla 'messages'
       const messages = await pool.query(
         `SELECT m.id, m.content AS msg, m.from_user_id AS "from", m.timestamp AS fecha
-        FROM messages m
-        WHERE (m.from_user_id = $1 AND m.to_user_id = $2)
-          OR (m.from_user_id = $2 AND m.to_user_id = $1)
-        ORDER BY m.timestamp ASC`,
+         FROM messages m
+         WHERE (m.from_user_id = $1 AND m.to_user_id = $2)
+            OR (m.from_user_id = $2 AND m.to_user_id = $1)
+         ORDER BY m.timestamp ASC`,
         [currentUserId, otherUserId]
       );
 
@@ -94,7 +82,60 @@ app.get(
   }
 );
 
-// --- SERVIDOR WEB SOCKETS ---
+// --- NUEVO: Crear conversación entre comprador y vendedor ---
+app.post("/api/create_conversation", async (req, res) => {
+  const { buyer_id, seller_id } = req.body;
+
+  if (!buyer_id || !seller_id) {
+    return res.status(400).json({ error: "buyer_id y seller_id son requeridos." });
+  }
+
+  try {
+    const client = await pool.connect();
+
+    const existing = await client.query(
+      `SELECT id FROM conversations
+       WHERE (user1_id = $1 AND user2_id = $2)
+          OR (user1_id = $2 AND user2_id = $1)
+       LIMIT 1`,
+      [buyer_id, seller_id]
+    );
+
+    let conversation_id;
+
+    if (existing.rows.length > 0) {
+      conversation_id = existing.rows[0].id;
+    } else {
+      const insertConv = await client.query(
+        `INSERT INTO conversations (user1_id, user2_id, created_at)
+         VALUES ($1, $2, NOW())
+         RETURNING id`,
+        [buyer_id, seller_id]
+      );
+      conversation_id = insertConv.rows[0].id;
+    }
+
+    const sellerData = await client.query(
+      `SELECT id, nombre AS name
+       FROM usuarios
+       WHERE id = $1`,
+      [seller_id]
+    );
+
+    client.release();
+
+    res.status(200).json({
+      conversation_id,
+      seller: sellerData.rows[0] || { id: seller_id, name: "Vendedor" }
+    });
+
+  } catch (error) {
+    console.error("Error en create_conversation:", error);
+    res.status(500).json({ error: "Error interno del servidor." });
+  }
+});
+
+// --- Servidor WebSockets ---
 const server = http.createServer(app);
 const wss = new WebSocket.Server({ server });
 
@@ -108,79 +149,63 @@ wss.on("connection", (ws) => {
 
   ws.on("message", async (msgRaw) => {
     try {
-      const msg = JSON.parse(msgRaw); // --- REGISTRAR PUSH ---
+      const msg = JSON.parse(msgRaw);
 
+      // --- Registrar Push ---
       if (msg.type === "registrar_push" && msg.userId && msg.subscription) {
-        const userId = msg.userId;
-        const subscription = msg.subscription;
         const client = await pool.connect();
         try {
           const updateResult = await client.query(
             "UPDATE push_subscriptions SET subscription = $1 WHERE user_id = $2 RETURNING *",
-            [JSON.stringify(subscription), userId]
+            [JSON.stringify(msg.subscription), msg.userId]
           );
 
           if (updateResult.rows.length === 0) {
             await client.query(
               "INSERT INTO push_subscriptions (user_id, subscription) VALUES ($1, $2)",
-              [userId, JSON.stringify(subscription)]
+              [msg.userId, JSON.stringify(msg.subscription)]
             );
           }
-          console.log(
-            "Suscripción a notificaciones push registrada para:",
-            userId
-          );
         } finally {
           client.release();
         }
-      } // --- IDENTIFICAR USUARIO ---
+        return;
+      }
 
+      // --- Identificar usuario ---
       if (msg.type === "identificacion" && msg.userId) {
         ws.userId = msg.userId;
         conexiones.set(ws.userId, ws);
-        console.log(`Usuario conectado: ${ws.userId}`);
-        ws.send(
-          JSON.stringify({
-            type: "status",
-            msg: "identificado",
-            userId: ws.userId,
-          })
-        );
+        ws.send(JSON.stringify({ type: "status", msg: "identificado", userId: ws.userId }));
         return;
-      } // --- CAMBIO: LÓGICA DE CHAT ALINEADA CON GO --- // El mensaje ya no requiere un chat_id para ser guardado
+      }
 
+      // --- Enviar mensaje ---
       if (msg.type === "mensaje" && msg.from && msg.to && msg.msg) {
         if (msg.from !== ws.userId) {
-          ws.send(
-            JSON.stringify({
-              type: "error",
-              msg: "No puedes enviar un mensaje en nombre de otro usuario.",
-            })
-          );
+          ws.send(JSON.stringify({ type: "error", msg: "No puedes enviar en nombre de otro usuario." }));
           return;
         }
 
         try {
-          // La consulta INSERT ahora usa la tabla 'messages' y las nuevas columnas
           const result = await pool.query(
-            `INSERT INTO messages (from_user_id, to_user_id, content, timestamp) VALUES ($1, $2, $3, NOW()) RETURNING timestamp`,
+            `INSERT INTO messages (from_user_id, to_user_id, content, timestamp)
+             VALUES ($1, $2, $3, NOW())
+             RETURNING timestamp`,
             [msg.from, msg.to, msg.msg]
           );
 
-          const fechaMensaje = result.rows[0].timestamp; // Mensaje para el RECEPTOR
+          const fechaMensaje = result.rows[0].timestamp;
 
           const receptor = conexiones.get(msg.to);
           if (receptor && receptor.readyState === WebSocket.OPEN) {
-            receptor.send(
-              JSON.stringify({
-                type: "mensaje",
-                from: msg.from,
-                to: msg.to,
-                chat_id: msg.chat_id, // Se mantiene para compatibilidad con el cliente
-                msg: msg.msg,
-                fecha: fechaMensaje,
-              })
-            );
+            receptor.send(JSON.stringify({
+              type: "mensaje",
+              from: msg.from,
+              to: msg.to,
+              msg: msg.msg,
+              fecha: fechaMensaje
+            }));
           } else {
             const subscriptionResult = await pool.query(
               "SELECT subscription FROM push_subscriptions WHERE user_id = $1",
@@ -192,64 +217,45 @@ wss.on("connection", (ws) => {
                 title: "Nuevo mensaje",
                 body: `De: ${msg.from} - ${msg.msg}`,
               });
-              webpush
-                .sendNotification(JSON.parse(subscription), payload)
-                .catch((err) =>
-                  console.error("Error al enviar notificación push:", err)
-                );
+              webpush.sendNotification(JSON.parse(subscription), payload)
+                .catch(err => console.error("Error al enviar notificación push:", err));
             }
-          } // Mensaje de confirmación para el EMISOR
-          ws.send(
-            JSON.stringify({
-              type: "enviado",
-              from: msg.from,
-              to: msg.to,
-              chat_id: msg.chat_id, // Se mantiene para compatibilidad con el cliente
-              msg: msg.msg,
-              fecha: fechaMensaje,
-            })
-          );
-        } catch (dbErr) {
-          console.error("Error al guardar mensaje en la DB:", dbErr);
-          ws.send(JSON.stringify({ type: "error", msg: "Error de servidor." }));
-        }
-        return;
-      } // --- TYPING EVENT ---
+          }
 
-      if (msg.type === "typing" && msg.from && msg.to) {
-        if (msg.from !== ws.userId) {
-          return;
-        }
-        const receptor = conexiones.get(msg.to);
-        if (receptor && receptor.readyState === WebSocket.OPEN) {
-          receptor.send(
-            JSON.stringify({
-              type: "typing",
-              from: msg.from,
-              to: msg.to,
-            })
-          );
+          ws.send(JSON.stringify({
+            type: "enviado",
+            from: msg.from,
+            to: msg.to,
+            msg: msg.msg,
+            fecha: fechaMensaje
+          }));
+
+        } catch (dbErr) {
+          console.error("Error al guardar mensaje:", dbErr);
+          ws.send(JSON.stringify({ type: "error", msg: "Error de servidor." }));
         }
         return;
       }
 
-      ws.send(
-        JSON.stringify({
-          type: "error",
-          msg: "Formato de mensaje inválido o tipo no reconocido.",
-        })
-      );
+      // --- Evento typing ---
+      if (msg.type === "typing" && msg.from && msg.to) {
+        if (msg.from !== ws.userId) return;
+        const receptor = conexiones.get(msg.to);
+        if (receptor && receptor.readyState === WebSocket.OPEN) {
+          receptor.send(JSON.stringify({ type: "typing", from: msg.from, to: msg.to }));
+        }
+        return;
+      }
+
+      ws.send(JSON.stringify({ type: "error", msg: "Formato o tipo inválido." }));
     } catch (err) {
-      ws.send(
-        JSON.stringify({ type: "error", msg: "Formato de mensaje inválido." })
-      );
+      ws.send(JSON.stringify({ type: "error", msg: "Formato de mensaje inválido." }));
     }
   });
 
   ws.on("close", () => {
     if (ws.userId) {
       conexiones.delete(ws.userId);
-      console.log(`Usuario desconectado: ${ws.userId}`);
     }
   });
 
@@ -258,6 +264,7 @@ wss.on("connection", (ws) => {
   });
 });
 
+// --- Ping para mantener conexión ---
 setInterval(() => {
   wss.clients.forEach((ws) => {
     if (!ws.isAlive) return ws.terminate();
