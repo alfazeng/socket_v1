@@ -60,79 +60,41 @@ app.get("/", (req, res) => {
   res.send("WebSocket and Express server is running.");
 });
 
-// Endpoint para crear o encontrar un chat existente
-app.post("/api/chats", authenticateToken, async (req, res) => {
-  const senderId = req.user.id;
-  const { recipient_id } = req.body;
+// --- REMOVIDO: LÓGICA DE CHAT BASADA EN TABLA INTERMEDIA (chat_members) ---
+// Se elimina el antiguo endpoint POST /api/chats porque el chat se define ahora
+// por los IDs de los usuarios y se gestiona al enviar el primer mensaje.
 
-  if (!recipient_id) {
-    return res.status(400).json({ error: "recipient_id es requerido." });
-  }
+// --- CAMBIO: LÓGICA DE CHAT ALINEADA CON GO ---
+// Endpoint para obtener el historial de mensajes de un chat
+// Ahora "chatId" en la URL representa el ID del otro usuario
+app.get(
+  "/api/chats/:otherUserId/messages",
+  authenticateToken,
+  async (req, res) => {
+    const { otherUserId } = req.params;
+    const currentUserId = req.user.id;
 
-  try {
-    const existingChat = await pool.query(
-      `SELECT c.id FROM chats c
-        JOIN chat_members cm1 ON c.id = cm1.chat_id
-        JOIN chat_members cm2 ON c.id = cm2.chat_id
-        WHERE cm1.user_id = $1 AND cm2.user_id = $2`,
-      [senderId, recipient_id]
-    );
+    try {
+      // La consulta ahora busca mensajes directamente entre el usuario actual y el otro usuario,
+      // usando la nueva tabla 'messages'
+      const messages = await pool.query(
+        `SELECT m.id, m.content AS msg, m.from_user_id AS "from", m.timestamp AS fecha
+        FROM messages m
+        WHERE (m.from_user_id = $1 AND m.to_user_id = $2)
+          OR (m.from_user_id = $2 AND m.to_user_id = $1)
+        ORDER BY m.timestamp ASC`,
+        [currentUserId, otherUserId]
+      );
 
-    if (existingChat.rows.length > 0) {
-      return res.status(200).json({ chat_id: existingChat.rows[0].id });
+      res.status(200).json(messages.rows);
+    } catch (error) {
+      console.error("Error al obtener mensajes del chat:", error);
+      res.status(500).json({ error: "Error interno del servidor." });
     }
-
-    const newChat = await pool.query(
-      "INSERT INTO chats (created_at) VALUES (NOW()) RETURNING id"
-    );
-    const newChatId = newChat.rows[0].id;
-
-    await pool.query(
-      "INSERT INTO chat_members (chat_id, user_id) VALUES ($1, $2), ($1, $3)",
-      [newChatId, senderId, recipient_id]
-    );
-
-    res.status(201).json({ chat_id: newChatId });
-  } catch (error) {
-    console.error("Error al crear o encontrar chat:", error);
-    res.status(500).json({ error: "Error interno del servidor." });
   }
-});
-
-// NUEVO: Endpoint para obtener el historial de mensajes de un chat
-app.get("/api/chats/:chatId/messages", authenticateToken, async (req, res) => {
-  const { chatId } = req.params;
-  const userId = req.user.id;
-
-  try {
-    // Verificamos si el usuario es miembro de este chat
-    const isMember = await pool.query(
-      "SELECT 1 FROM chat_members WHERE chat_id = $1 AND user_id = $2",
-      [chatId, userId]
-    );
-
-    if (isMember.rows.length === 0) {
-      return res.status(403).json({ error: "Acceso denegado." });
-    }
-
-    const messages = await pool.query(
-      `SELECT m.id, m.mensaje AS msg, m.de_id AS from, m.fecha
-        FROM mensajes m
-        WHERE m.chat_id = $1
-        ORDER BY m.fecha ASC`,
-      [chatId]
-    );
-
-    res.status(200).json(messages.rows);
-  } catch (error) {
-    console.error("Error al obtener mensajes del chat:", error);
-    res.status(500).json({ error: "Error interno del servidor." });
-  }
-});
+);
 
 // --- SERVIDOR WEB SOCKETS ---
-
-// Se crea un servidor HTTP para Express y WebSockets
 const server = http.createServer(app);
 const wss = new WebSocket.Server({ server });
 
@@ -146,34 +108,33 @@ wss.on("connection", (ws) => {
 
   ws.on("message", async (msgRaw) => {
     try {
-      const msg = JSON.parse(msgRaw);
+      const msg = JSON.parse(msgRaw); // --- REGISTRAR PUSH ---
 
-      // --- REGISTRAR PUSH ---
       if (msg.type === "registrar_push" && msg.userId && msg.subscription) {
         const userId = msg.userId;
         const subscription = msg.subscription;
         const client = await pool.connect();
         try {
-          // Primero, intenta actualizar el registro
           const updateResult = await client.query(
             "UPDATE push_subscriptions SET subscription = $1 WHERE user_id = $2 RETURNING *",
             [JSON.stringify(subscription), userId]
           );
 
           if (updateResult.rows.length === 0) {
-            // Si no hay filas actualizadas, inserta un nuevo registro
             await client.query(
               "INSERT INTO push_subscriptions (user_id, subscription) VALUES ($1, $2)",
               [userId, JSON.stringify(subscription)]
             );
           }
-          console.log("Suscripción a notificaciones push registrada para:", userId);
+          console.log(
+            "Suscripción a notificaciones push registrada para:",
+            userId
+          );
         } finally {
           client.release();
         }
-      }
+      } // --- IDENTIFICAR USUARIO ---
 
-      // --- IDENTIFICAR USUARIO ---
       if (msg.type === "identificacion" && msg.userId) {
         ws.userId = msg.userId;
         conexiones.set(ws.userId, ws);
@@ -186,17 +147,9 @@ wss.on("connection", (ws) => {
           })
         );
         return;
-      }
+      } // --- CAMBIO: LÓGICA DE CHAT ALINEADA CON GO --- // El mensaje ya no requiere un chat_id para ser guardado
 
-      // --- ENVIAR MENSAJE ---
-      if (
-        msg.type === "mensaje" &&
-        msg.from &&
-        msg.to &&
-        msg.msg &&
-        msg.chat_id
-      ) {
-        // AÑADIDO: Verificamos que el emisor del mensaje sea el mismo que el usuario de la conexión
+      if (msg.type === "mensaje" && msg.from && msg.to && msg.msg) {
         if (msg.from !== ws.userId) {
           ws.send(
             JSON.stringify({
@@ -208,14 +161,14 @@ wss.on("connection", (ws) => {
         }
 
         try {
+          // La consulta INSERT ahora usa la tabla 'messages' y las nuevas columnas
           const result = await pool.query(
-            `INSERT INTO mensajes (chat_id, de_id, para_id, mensaje, fecha) VALUES ($1, $2, $3, $4, NOW()) RETURNING fecha`,
-            [msg.chat_id, msg.from, msg.to, msg.msg]
+            `INSERT INTO messages (from_user_id, to_user_id, content, timestamp) VALUES ($1, $2, $3, NOW()) RETURNING timestamp`,
+            [msg.from, msg.to, msg.msg]
           );
 
-          const fechaMensaje = result.rows[0].fecha;
+          const fechaMensaje = result.rows[0].timestamp; // Mensaje para el RECEPTOR
 
-          // Mensaje para el RECEPTOR
           const receptor = conexiones.get(msg.to);
           if (receptor && receptor.readyState === WebSocket.OPEN) {
             receptor.send(
@@ -223,7 +176,7 @@ wss.on("connection", (ws) => {
                 type: "mensaje",
                 from: msg.from,
                 to: msg.to,
-                chat_id: msg.chat_id,
+                chat_id: msg.chat_id, // Se mantiene para compatibilidad con el cliente
                 msg: msg.msg,
                 fecha: fechaMensaje,
               })
@@ -245,15 +198,13 @@ wss.on("connection", (ws) => {
                   console.error("Error al enviar notificación push:", err)
                 );
             }
-          }
-          
-          // Mensaje de confirmación para el EMISOR
+          } // Mensaje de confirmación para el EMISOR
           ws.send(
             JSON.stringify({
               type: "enviado",
               from: msg.from,
               to: msg.to,
-              chat_id: msg.chat_id,
+              chat_id: msg.chat_id, // Se mantiene para compatibilidad con el cliente
               msg: msg.msg,
               fecha: fechaMensaje,
             })
@@ -263,9 +214,8 @@ wss.on("connection", (ws) => {
           ws.send(JSON.stringify({ type: "error", msg: "Error de servidor." }));
         }
         return;
-      }
+      } // --- TYPING EVENT ---
 
-      // --- TYPING EVENT ---
       if (msg.type === "typing" && msg.from && msg.to) {
         if (msg.from !== ws.userId) {
           return;
