@@ -3,22 +3,22 @@ const WebSocket = require("ws");
 const webpush = require("web-push");
 const http = require("http");
 const { Pool } = require("pg");
-const jwt = require("jsonwebtoken");
 const cors = require("cors");
 
-// --- CLAVES VAPID y JWT ---
+// --- CLAVES VAPID ---
+// Estas claves son necesarias para enviar notificaciones push
 const VAPID_PUBLIC_KEY =
   "BKk3imcvxH5Wdz2k7O8-E3-mAM73dDLbIueqvVYuSVLNsUCEAfvtNhdG_2DFYXHihC2LvCfzSdEH3oudEjF3vjY";
 const VAPID_PRIVATE_KEY = "Co3e5xGt6GM5zRREBPcgoSH1DhW6pF8ej95Ysv7d6YI";
-const JWT_SECRET = process.env.JWT_SECRET || "tu_secreto_muy_seguro_y_largo";
 
 webpush.setVapidDetails(
-  "mailto:chatcerexapp@chatcerexapp.com",
+  "mailto:tuemail@ejemplo.com", // Cambia esto a tu email de contacto
   VAPID_PUBLIC_KEY,
   VAPID_PRIVATE_KEY
 );
 
 // --- Conexión a la base de datos ---
+// Se mantiene para guardar las suscripciones en la tabla `push_subscriptions`
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
   ssl: { rejectUnauthorized: false },
@@ -31,108 +31,14 @@ pool
 
 const PORT = process.env.PORT || 10000;
 const app = express();
-const conexiones = new Map();
 
 // --- Middleware ---
 app.use(cors());
 app.use(express.json());
 
-// --- Middleware de autenticación JWT ---
-const authenticateToken = (req, res, next) => {
-  const authHeader = req.headers.authorization;
-  const token = authHeader && authHeader.split(" ")[1];
-
-  if (!token) return res.sendStatus(401);
-
-  jwt.verify(token, JWT_SECRET, (err, user) => {
-    if (err) return res.sendStatus(403);
-    req.user = user;
-    next();
-  });
-};
-
 // --- Endpoint raíz ---
 app.get("/", (req, res) => {
-  res.send("WebSocket and Express server is running.");
-});
-
-// --- Obtener historial de mensajes ---
-app.get(
-  "/api/chats/:otherUserId/messages",
-  authenticateToken,
-  async (req, res) => {
-    const { otherUserId } = req.params;
-    const currentUserId = req.user.id;
-
-    try {
-      const messages = await pool.query(
-        `SELECT m.id, m.content AS msg, m.from_user_id AS "from", m.timestamp AS fecha
-         FROM messages m
-         WHERE (m.from_user_id = $1 AND m.to_user_id = $2)
-            OR (m.from_user_id = $2 AND m.to_user_id = $1)
-         ORDER BY m.timestamp ASC`,
-        [currentUserId, otherUserId]
-      );
-
-      res.status(200).json(messages.rows);
-    } catch (error) {
-      console.error("Error al obtener mensajes del chat:", error);
-      res.status(500).json({ error: "Error interno del servidor." });
-    }
-  }
-);
-
-// --- NUEVO: Crear conversación entre comprador y vendedor ---
-app.post("/api/create_conversation", async (req, res) => {
-  const { buyer_id, seller_id } = req.body;
-
-  if (!buyer_id || !seller_id) {
-    return res.status(400).json({ error: "buyer_id y seller_id son requeridos." });
-  }
-
-  try {
-    const client = await pool.connect();
-
-    const existing = await client.query(
-      `SELECT id FROM conversations
-       WHERE (user1_id = $1 AND user2_id = $2)
-          OR (user1_id = $2 AND user2_id = $1)
-       LIMIT 1`,
-      [buyer_id, seller_id]
-    );
-
-    let conversation_id;
-
-    if (existing.rows.length > 0) {
-      conversation_id = existing.rows[0].id;
-    } else {
-      const insertConv = await client.query(
-        `INSERT INTO conversations (user1_id, user2_id, created_at)
-         VALUES ($1, $2, NOW())
-         RETURNING id`,
-        [buyer_id, seller_id]
-      );
-      conversation_id = insertConv.rows[0].id;
-    }
-
-    const sellerData = await client.query(
-      `SELECT id, nombre AS name
-       FROM usuarios
-       WHERE id = $1`,
-      [seller_id]
-    );
-
-    client.release();
-
-    res.status(200).json({
-      conversation_id,
-      seller: sellerData.rows[0] || { id: seller_id, name: "Vendedor" }
-    });
-
-  } catch (error) {
-    console.error("Error en create_conversation:", error);
-    res.status(500).json({ error: "Error interno del servidor." });
-  }
+  res.send("Notification Subscription Server is running.");
 });
 
 // --- Servidor WebSockets ---
@@ -143,6 +49,9 @@ server.listen(PORT, () => {
   console.log("Servidor iniciado en puerto:", PORT);
 });
 
+// =================================================================================
+// --- LÓGICA DE WEBSOCKETS PARA SUSCRIPCIONES ---
+// =================================================================================
 wss.on("connection", (ws) => {
   ws.isAlive = true;
   ws.on("pong", () => (ws.isAlive = true));
@@ -150,111 +59,70 @@ wss.on("connection", (ws) => {
   ws.on("message", async (msgRaw) => {
     try {
       const msg = JSON.parse(msgRaw);
+      console.log(`⬅️ WS Msg Received:`, msg);
 
-      // --- Registrar Push ---
-   // --- Registrar Push ---
-if (msg.type === "registrar_push" && msg.userId && msg.subscription) {
-  const client = await pool.connect();
-  try {
-    // Analizamos el objeto de suscripción para obtener los campos
-    const subscription = msg.subscription;
-    const endpoint = subscription.endpoint;
-    const p256dh = subscription.keys.p256dh;
-    const auth = subscription.keys.auth;
+      // --- Manejador para la identificación del usuario ---
+      // Sigue siendo necesario para saber a qué usuario pertenece la suscripción
+      if (msg.type === "identificacion" && msg.userId) {
+        ws.userId = msg.userId; // Asocia el ID a esta conexión
+        console.log(`✅ Usuario ${msg.userId} (${msg.fullName}) conectado y esperando suscripción.`);
+        ws.send(JSON.stringify({ type: "identificado", msg: "Listo para recibir suscripción." }));
+        return;
+      }
 
-    const updateResult = await client.query(
-      "UPDATE push_subscriptions SET endpoint = $1, p256dh = $2, auth = $3 WHERE user_id = $4 RETURNING *",
-      [endpoint, p256dh, auth, msg.userId]
-    );
-
-    if (updateResult.rows.length === 0) {
-      await client.query(
-        "INSERT INTO push_subscriptions (user_id, endpoint, p256dh, auth) VALUES ($1, $2, $3, $4)",
-        [msg.userId, endpoint, p256dh, auth]
-      );
-    }
-  } finally {
-    client.release();
-  }
-  return;
-}
-
-      // --- Enviar mensaje ---
-      if (msg.type === "mensaje" && msg.from && msg.to && msg.msg) {
-        if (msg.from !== ws.userId) {
-          ws.send(JSON.stringify({ type: "error", msg: "No puedes enviar en nombre de otro usuario." }));
-          return;
+      // --- Manejador para Registrar Push ---
+      // Este es el núcleo de la funcionalidad que se conserva.
+      if (msg.type === "registrar_push" && msg.userId && msg.subscription) {
+        // Verificamos que el userId del mensaje coincida con el de la conexión identificada
+        if (ws.userId !== msg.userId) {
+            console.warn(`Intento de registrar suscripción para un usuario diferente (${msg.userId}) en una conexión de ${ws.userId}.`);
+            return;
         }
 
+        console.log(`📲 Registrando suscripción push para el usuario ${msg.userId}`);
+        const client = await pool.connect();
         try {
-          const result = await pool.query(
-            `INSERT INTO messages (from_user_id, to_user_id, content, timestamp)
-             VALUES ($1, $2, $3, NOW())
-             RETURNING timestamp`,
-            [msg.from, msg.to, msg.msg]
+          const { endpoint, keys } = msg.subscription;
+          const { p256dh, auth } = keys;
+
+          const updateResult = await client.query(
+            "UPDATE push_subscriptions SET endpoint = $1, p256dh = $2, auth = $3 WHERE user_id = $4 RETURNING *",
+            [endpoint, p256dh, auth, msg.userId]
           );
 
-          const fechaMensaje = result.rows[0].timestamp;
-
-          const receptor = conexiones.get(msg.to);
-          if (receptor && receptor.readyState === WebSocket.OPEN) {
-            receptor.send(JSON.stringify({
-              type: "mensaje",
-              from: msg.from,
-              to: msg.to,
-              msg: msg.msg,
-              fecha: fechaMensaje
-            }));
-          } else {
-            const subscriptionResult = await pool.query(
-              "SELECT subscription FROM push_subscriptions WHERE user_id = $1",
-              [msg.to]
+          if (updateResult.rows.length === 0) {
+            await client.query(
+              "INSERT INTO push_subscriptions (user_id, endpoint, p256dh, auth) VALUES ($1, $2, $3, $4)",
+              [msg.userId, endpoint, p256dh, auth]
             );
-            const subscription = subscriptionResult.rows[0]?.subscription;
-            if (subscription) {
-              const payload = JSON.stringify({
-                title: "Nuevo mensaje",
-                body: `De: ${msg.from} - ${msg.msg}`,
-              });
-              webpush.sendNotification(JSON.parse(subscription), payload)
-                .catch(err => console.error("Error al enviar notificación push:", err));
-            }
           }
+          console.log(`👍 Suscripción para usuario ${msg.userId} guardada correctamente.`);
+          ws.send(JSON.stringify({ type: "suscripcion_registrada", status: "ok" }));
 
-          ws.send(JSON.stringify({
-            type: "enviado",
-            from: msg.from,
-            to: msg.to,
-            msg: msg.msg,
-            fecha: fechaMensaje
-          }));
-
-        } catch (dbErr) {
-          console.error("Error al guardar mensaje:", dbErr);
-          ws.send(JSON.stringify({ type: "error", msg: "Error de servidor." }));
+        } catch(dbErr) {
+            console.error(`❌ Error de base de datos al guardar suscripción para ${msg.userId}:`, dbErr);
+            ws.send(JSON.stringify({ type: "error", msg: "No se pudo guardar la suscripción." }));
+        }
+        finally {
+          client.release();
         }
         return;
       }
 
-      // --- Evento typing ---
-      if (msg.type === "typing" && msg.from && msg.to) {
-        if (msg.from !== ws.userId) return;
-        const receptor = conexiones.get(msg.to);
-        if (receptor && receptor.readyState === WebSocket.OPEN) {
-          receptor.send(JSON.stringify({ type: "typing", from: msg.from, to: msg.to }));
-        }
-        return;
-      }
+      // --- Mensaje de fallback si no se reconoce el tipo ---
+      ws.send(JSON.stringify({ type: "error", msg: "Tipo de mensaje no reconocido." }));
 
-      ws.send(JSON.stringify({ type: "error", msg: "Formato o tipo inválido." }));
     } catch (err) {
-      ws.send(JSON.stringify({ type: "error", msg: "Formato de mensaje inválido." }));
+      console.error(`❌ Error procesando mensaje WS. Causa: ${err.message}. Mensaje crudo: ${msgRaw}`);
+      ws.send(JSON.stringify({ type: "error", msg: "Formato de mensaje inválido o error interno." }));
     }
   });
 
   ws.on("close", () => {
     if (ws.userId) {
-      conexiones.delete(ws.userId);
+      console.log(`🔌 Usuario ${ws.userId} desconectado.`);
+    } else {
+      console.log("🔌 Una conexión anónima se ha cerrado.");
     }
   });
 
@@ -263,10 +131,14 @@ if (msg.type === "registrar_push" && msg.userId && msg.subscription) {
   });
 });
 
-// --- Ping para mantener conexión ---
+// --- Ping para mantener conexiones vivas ---
 setInterval(() => {
   wss.clients.forEach((ws) => {
-    if (!ws.isAlive) return ws.terminate();
+    if (!ws.isAlive) {
+      if (ws.userId) console.log(`Terminando conexión inactiva del usuario ${ws.userId}`);
+      else console.log("Terminando conexión inactiva anónima");
+      return ws.terminate();
+    }
     ws.isAlive = false;
     ws.ping(() => {});
   });
