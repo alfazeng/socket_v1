@@ -71,43 +71,44 @@ wss.on("connection", (ws) => {
       }
 
       // --- Manejador para Registrar Push ---
-      // Este es el núcleo de la funcionalidad que se conserva.
-      if (msg.type === "registrar_push" && msg.userId && msg.subscription) {
-        // Verificamos que el userId del mensaje coincida con el de la conexión identificada
-        if (ws.userId !== msg.userId) {
-            console.warn(`Intento de registrar suscripción para un usuario diferente (${msg.userId}) en una conexión de ${ws.userId}.`);
-            return;
-        }
+   // ENCUENTRA Y REEMPLAZA ESTE BLOQUE EN TU server.js
 
-        console.log(`📲 Registrando suscripción push para el usuario ${msg.userId}`);
-        const client = await pool.connect();
-        try {
-          const { endpoint, keys } = msg.subscription;
-          const { p256dh, auth } = keys;
+if (msg.type === "registrar_push" && msg.userId && msg.subscription) {
+    if (ws.userId !== msg.userId) {
+        console.warn(`Intento de registrar suscripción para un usuario diferente (${msg.userId}) en una conexión de ${ws.userId}.`);
+        return;
+    }
 
-          const updateResult = await client.query(
+    console.log(`📲 Registrando suscripción push para el usuario ${msg.userId}`);
+    const client = await pool.connect();
+    try {
+        const { endpoint, keys } = msg.subscription;
+        const { p256dh, auth } = keys;
+
+        // CONSULTA UPDATE CORREGIDA con "user_id"
+        const updateResult = await client.query(
             "UPDATE push_subscriptions SET endpoint = $1, p256dh = $2, auth = $3 WHERE user_id = $4 RETURNING *",
             [endpoint, p256dh, auth, msg.userId]
-          );
+        );
 
-          if (updateResult.rows.length === 0) {
+        if (updateResult.rows.length === 0) {
+            // CONSULTA INSERT CORREGIDA con "user_id"
             await client.query(
-              "INSERT INTO push_subscriptions (user_id, endpoint, p256dh, auth) VALUES ($1, $2, $3, $4)",
-              [msg.userId, endpoint, p256dh, auth]
+                "INSERT INTO push_subscriptions (user_id, endpoint, p256dh, auth) VALUES ($1, $2, $3, $4)",
+                [msg.userId, endpoint, p256dh, auth]
             );
-          }
-          console.log(`👍 Suscripción para usuario ${msg.userId} guardada correctamente.`);
-          ws.send(JSON.stringify({ type: "suscripcion_registrada", status: "ok" }));
+        }
+        console.log(`👍 Suscripción para usuario ${msg.userId} guardada correctamente.`);
+        ws.send(JSON.stringify({ type: "suscripcion_registrada", status: "ok" }));
 
-        } catch(dbErr) {
-            console.error(`❌ Error de base de datos al guardar suscripción para ${msg.userId}:`, dbErr);
-            ws.send(JSON.stringify({ type: "error", msg: "No se pudo guardar la suscripción." }));
-        }
-        finally {
-          client.release();
-        }
-        return;
-      }
+    } catch (dbErr) {
+        console.error(`❌ Error de base de datos al guardar suscripción para ${msg.userId}:`, dbErr);
+        ws.send(JSON.stringify({ type: "error", msg: "No se pudo guardar la suscripción." }));
+    } finally {
+        client.release();
+    }
+    return;
+}
 
       // --- Mensaje de fallback si no se reconoce el tipo ---
       ws.send(JSON.stringify({ type: "error", msg: "Tipo de mensaje no reconocido." }));
