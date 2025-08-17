@@ -152,33 +152,32 @@ wss.on("connection", (ws) => {
       const msg = JSON.parse(msgRaw);
 
       // --- Registrar Push ---
-      if (msg.type === "registrar_push" && msg.userId && msg.subscription) {
-        const client = await pool.connect();
-        try {
-          const updateResult = await client.query(
-            "UPDATE push_subscriptions SET subscription = $1 WHERE user_id = $2 RETURNING *",
-            [JSON.stringify(msg.subscription), msg.userId]
-          );
+   // --- Registrar Push ---
+if (msg.type === "registrar_push" && msg.userId && msg.subscription) {
+  const client = await pool.connect();
+  try {
+    // Analizamos el objeto de suscripción para obtener los campos
+    const subscription = msg.subscription;
+    const endpoint = subscription.endpoint;
+    const p256dh = subscription.keys.p256dh;
+    const auth = subscription.keys.auth;
 
-          if (updateResult.rows.length === 0) {
-            await client.query(
-              "INSERT INTO push_subscriptions (user_id, subscription) VALUES ($1, $2)",
-              [msg.userId, JSON.stringify(msg.subscription)]
-            );
-          }
-        } finally {
-          client.release();
-        }
-        return;
-      }
+    const updateResult = await client.query(
+      "UPDATE push_subscriptions SET endpoint = $1, p256dh = $2, auth = $3 WHERE user_id = $4 RETURNING *",
+      [endpoint, p256dh, auth, msg.userId]
+    );
 
-      // --- Identificar usuario ---
-      if (msg.type === "identificacion" && msg.userId) {
-        ws.userId = msg.userId;
-        conexiones.set(ws.userId, ws);
-        ws.send(JSON.stringify({ type: "status", msg: "identificado", userId: ws.userId }));
-        return;
-      }
+    if (updateResult.rows.length === 0) {
+      await client.query(
+        "INSERT INTO push_subscriptions (user_id, endpoint, p256dh, auth) VALUES ($1, $2, $3, $4)",
+        [msg.userId, endpoint, p256dh, auth]
+      );
+    }
+  } finally {
+    client.release();
+  }
+  return;
+}
 
       // --- Enviar mensaje ---
       if (msg.type === "mensaje" && msg.from && msg.to && msg.msg) {
