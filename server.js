@@ -48,6 +48,22 @@ const wss = new WebSocket.Server({ server });
 server.listen(PORT, () => {
   console.log("Servidor iniciado en puerto:", PORT);
 });
+// =================================================================================
+// --- LÓGICA DE ENVIAR NOTIFICACIONES DESDE EL PANEL ---
+// =================================================================================
+
+
+// Middleware para verificar si el usuario es admin
+const verifyAdmin = (req, res, next) => {
+  // Este middleware debe correr DESPUÉS de authenticateToken
+  if (req.user && req.user.rol === 'admin') {
+    next(); // El usuario es admin, continuar
+  } else {
+    res.sendStatus(403); // Prohibido
+  }
+};
+
+
 
 // =================================================================================
 // --- LÓGICA DE WEBSOCKETS PARA SUSCRIPCIONES ---
@@ -132,6 +148,78 @@ if (msg.type === "registrar_push" && msg.userId && msg.subscription) {
   });
 });
 
+
+// --- ENDPOINT PARA ENVIAR NOTIFICACIONES MASIVAS Y SEGMENTADAS ---
+app.post('/api/notifications/send', authenticateToken, verifyAdmin, async (req, res) => {
+  // Obtenemos los datos del panel de React
+  const { title, body, url, image, segments } = req.body;
+
+  if (!title || !body || !url) {
+    return res.status(400).json({ message: 'Título, cuerpo y URL son requeridos.' });
+  }
+
+  try {
+    // --- Lógica de Segmentación ---
+    let queryParams = [];
+    let query = `
+      SELECT ps.endpoint, ps.p256dh, ps.auth
+      FROM push_subscriptions ps
+      JOIN usuarios u ON ps.user_id = u.id
+      WHERE 1=1
+    `;
+
+    if (segments && segments.state) {
+      queryParams.push(segments.state);
+      query += ` AND u.estado = $${queryParams.length}`;
+    }
+    // Aquí podrías añadir más filtros: por fecha de registro, etc.
+
+    const result = await pool.query(query, queryParams);
+    const subscriptions = result.rows;
+
+    if (subscriptions.length === 0) {
+      return res.status(404).json({ message: 'No se encontraron usuarios con esos criterios.' });
+    }
+
+    console.log(`Enviando notificación a ${subscriptions.length} suscriptores...`);
+
+    // --- Lógica de Envío ---
+    const payload = JSON.stringify({
+      title: title,
+      body: body,
+      icon: 'https://chatcerexapp.netlify.app/img/icon-192.png', // Ícono por defecto
+      image: image, // URL de la imagen de la promoción
+      data: {
+        url: url, // Link al que irá el usuario al hacer clic
+      },
+    });
+
+    // Enviamos todas las notificaciones en paralelo
+    const sendPromises = subscriptions.map(s => {
+      const subscriptionObject = {
+        endpoint: s.endpoint,
+        keys: { p256dh: s.p256dh, auth: s.auth },
+      };
+      return webpush.sendNotification(subscriptionObject, payload).catch(err => {
+        // Si una suscripción es inválida (error 410), la eliminamos
+        if (err.statusCode === 410) {
+          console.log('Eliminando suscripción expirada:', s.endpoint);
+          pool.query('DELETE FROM push_subscriptions WHERE endpoint = $1', [s.endpoint]);
+        } else {
+          console.error('Error al enviar notificación individual:', err);
+        }
+      });
+    });
+
+    await Promise.all(sendPromises);
+
+    res.status(200).json({ message: `Notificaciones enviadas a ${subscriptions.length} usuarios.` });
+
+  } catch (error) {
+    console.error('Error masivo al enviar notificaciones:', error);
+    res.status(500).json({ message: 'Error interno del servidor.' });
+  }
+});
 // --- Ping para mantener conexiones vivas ---
 setInterval(() => {
   wss.clients.forEach((ws) => {
