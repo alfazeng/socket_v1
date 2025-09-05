@@ -6,11 +6,11 @@
     "start": "node server.js"
   },
   "dependencies": {
-    "ws": "^8.18.3",
-    "web-push": "^3.6.5",
-    "pg": "^8.11.3",
-    "express": "^4.19.2",
     "cors": "^2.8.5",
-    "jsonwebtoken": "^9.0.2"
+    "express": "^4.19.2",
+    "jsonwebtoken": "^9.0.2",
+    "pg": "^8.11.3",
+    "web-push": "^3.6.5",
+    "ws": "^8.18.3"
   }
 }

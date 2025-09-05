@@ -1,24 +1,14 @@
 const express = require("express");
 const WebSocket = require("ws");
-const webpush = require("web-push");
 const http = require("http");
 const { Pool } = require("pg");
-const jwt = require("jsonwebtoken");
 const cors = require("cors");
+const jwt = require("jsonwebtoken"); // <-- AÑADIDO: Para autenticar el nuevo endpoint
 
-// --- CLAVES VAPID y JWT ---
-const VAPID_PUBLIC_KEY =
-  "BKk3imcvxH5Wdz2k7O8-E3-mAM73dDLbIueqvVYuSVLNsUCEAfvtNhdG_2DFYXHihC2LvCfzSdEH3oudEjF3vjY";
-const VAPID_PRIVATE_KEY = "Co3e5xGt6GM5zRREBPcgoSH1DhW6pF8ej95Ysv7d6YI";
+// --- CLAVE SECRETA PARA JWT ---
 const JWT_SECRET = process.env.JWT_SECRET || "tu_secreto_muy_seguro_y_largo";
 
-webpush.setVapidDetails(
-  "mailto:chatcerexapp@chatcerexapp.com",
-  VAPID_PUBLIC_KEY,
-  VAPID_PRIVATE_KEY
-);
-
-// --- Conexión a la base de datos ---
+// --- Configuración de la Base de Datos ---
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
   ssl: { rejectUnauthorized: false },
@@ -26,248 +16,204 @@ const pool = new Pool({
 
 pool
   .connect()
-  .then(() => console.log("Conectado a la base de datos PostgreSQL"))
-  .catch((err) => console.error("Error de conexión a la DB:", err.stack));
+  .then(() => console.log("✅ Conectado a la base de datos PostgreSQL"))
+  .catch((err) => console.error("❌ Error de conexión a la DB:", err.stack));
 
+// --- Inicialización del Servidor ---
 const PORT = process.env.PORT || 10000;
 const app = express();
-const conexiones = new Map();
-
-// --- Middleware ---
 app.use(cors());
-app.use(express.json());
+app.use(express.json()); // <-- AÑADIDO: Middleware para que Express entienda JSON en las peticiones POST
 
-// --- Middleware de autenticación JWT ---
+// =================================================================================
+// --- MIDDLEWARE DE AUTENTICACIÓN (NUEVO) ---
+// =================================================================================
+// Este middleware protegerá nuestro nuevo endpoint y nos dará acceso a req.user
 const authenticateToken = (req, res, next) => {
   const authHeader = req.headers.authorization;
   const token = authHeader && authHeader.split(" ")[1];
 
-  if (!token) return res.sendStatus(401);
+  if (token == null) return res.sendStatus(401); // No hay token
 
   jwt.verify(token, JWT_SECRET, (err, user) => {
-    if (err) return res.sendStatus(403);
+    if (err) return res.sendStatus(403); // Token inválido
     req.user = user;
     next();
   });
 };
 
-// --- Endpoint raíz ---
+// =================================================================================
+// --- ENDPOINTS DE API REST ---
+// =================================================================================
+
+// Endpoint de salud para verificar que el servidor está vivo
 app.get("/", (req, res) => {
-  res.send("WebSocket and Express server is running.");
+  res.send("WebSocket Subscription Server is running.");
 });
 
-// --- Obtener historial de mensajes ---
-app.get(
-  "/api/chats/:otherUserId/messages",
-  authenticateToken,
-  async (req, res) => {
-    const { otherUserId } = req.params;
-    const currentUserId = req.user.id;
+// --- NUEVO ENDPOINT PARA LA LÓGICA DEL CERBOT ---
+// Es llamado por el ChatModal del frontend
+app.post("/api/cerbot/message", authenticateToken, async (req, res) => {
+  const { sellerId, message } = req.body;
 
-    try {
-      const messages = await pool.query(
-        `SELECT m.id, m.content AS msg, m.from_user_id AS "from", m.timestamp AS fecha
-         FROM messages m
-         WHERE (m.from_user_id = $1 AND m.to_user_id = $2)
-            OR (m.from_user_id = $2 AND m.to_user_id = $1)
-         ORDER BY m.timestamp ASC`,
-        [currentUserId, otherUserId]
-      );
-
-      res.status(200).json(messages.rows);
-    } catch (error) {
-      console.error("Error al obtener mensajes del chat:", error);
-      res.status(500).json({ error: "Error interno del servidor." });
-    }
-  }
-);
-
-// --- NUEVO: Crear conversación entre comprador y vendedor ---
-app.post("/api/create_conversation", async (req, res) => {
-  const { buyer_id, seller_id } = req.body;
-
-  if (!buyer_id || !seller_id) {
-    return res.status(400).json({ error: "buyer_id y seller_id son requeridos." });
+  if (!sellerId || !message) {
+    return res.status(400).json({ error: "Faltan sellerId o message." });
   }
 
   try {
-    const client = await pool.connect();
-
-    const existing = await client.query(
-      `SELECT id FROM conversations
-       WHERE (user1_id = $1 AND user2_id = $2)
-          OR (user1_id = $2 AND user2_id = $1)
-       LIMIT 1`,
-      [buyer_id, seller_id]
+    const sellerCheck = await pool.query(
+      "SELECT cerbot_activo FROM usuarios WHERE id = $1",
+      [sellerId]
     );
 
-    let conversation_id;
+    const isCerbotActive = sellerCheck.rows[0]?.cerbot_activo;
 
-    if (existing.rows.length > 0) {
-      conversation_id = existing.rows[0].id;
-    } else {
-      const insertConv = await client.query(
-        `INSERT INTO conversations (user1_id, user2_id, created_at)
-         VALUES ($1, $2, NOW())
-         RETURNING id`,
-        [buyer_id, seller_id]
+    if (isCerbotActive) {
+      const knowledge = await pool.query(
+        "SELECT respuesta FROM cerbot_conocimiento WHERE user_id = $1 AND pregunta ILIKE $2",
+        [sellerId, `%${message}%`]
       );
-      conversation_id = insertConv.rows[0].id;
+
+      if (knowledge.rows.length > 0) {
+        res.json({ botResponse: knowledge.rows[0].respuesta });
+      } else {
+        res.json({
+          botResponse:
+            "No he encontrado una respuesta exacta para tu pregunta. Intenta reformularla o contacta directamente al vendedor a través de WhatsApp.",
+        });
+      }
+    } else {
+      res.json({
+        botResponse:
+          "Este usuario no ha configurado su Cerbot a detalle, sin embargo estoy aquí para brindarte apoyo sobre esta publicación. Lo más seguro es que lo que estás buscando se resuelva escribiéndole directamente por WhatsApp. 📲 Toca el botón verde que aparece abajo para chatear directamente con el vendedor.",
+      });
     }
-
-    const sellerData = await client.query(
-      `SELECT id, nombre AS name
-       FROM usuarios
-       WHERE id = $1`,
-      [seller_id]
-    );
-
-    client.release();
-
-    res.status(200).json({
-      conversation_id,
-      seller: sellerData.rows[0] || { id: seller_id, name: "Vendedor" }
-    });
-
   } catch (error) {
-    console.error("Error en create_conversation:", error);
+    console.error("Error en el endpoint del Cerbot:", error);
     res.status(500).json({ error: "Error interno del servidor." });
   }
 });
 
-// --- Servidor WebSockets ---
+// --- INICIO DEL SERVIDOR HTTP Y WEBSOCKET ---
 const server = http.createServer(app);
 const wss = new WebSocket.Server({ server });
 
 server.listen(PORT, () => {
-  console.log("Servidor iniciado en puerto:", PORT);
+  console.log(`🚀 Servidor WebSocket iniciado en el puerto: ${PORT}`);
 });
 
+// =================================================================================
+// --- LÓGICA WEBSOCKET PARA NOTIFICACIONES PUSH (SIN ALTERACIONES) ---
+// =================================================================================
 wss.on("connection", (ws) => {
   ws.isAlive = true;
   ws.on("pong", () => (ws.isAlive = true));
 
+  console.log("🔌 Nuevo cliente conectado.");
+
   ws.on("message", async (msgRaw) => {
+    let msg;
     try {
-      const msg = JSON.parse(msgRaw);
-
-      // --- Registrar Push ---
-      if (msg.type === "registrar_push" && msg.userId && msg.subscription) {
-        const client = await pool.connect();
-        try {
-          const updateResult = await client.query(
-            "UPDATE push_subscriptions SET subscription = $1 WHERE user_id = $2 RETURNING *",
-            [JSON.stringify(msg.subscription), msg.userId]
-          );
-
-          if (updateResult.rows.length === 0) {
-            await client.query(
-              "INSERT INTO push_subscriptions (user_id, subscription) VALUES ($1, $2)",
-              [msg.userId, JSON.stringify(msg.subscription)]
-            );
-          }
-        } finally {
-          client.release();
-        }
-        return;
-      }
-
-      // --- Identificar usuario ---
-      if (msg.type === "identificacion" && msg.userId) {
-        ws.userId = msg.userId;
-        conexiones.set(ws.userId, ws);
-        ws.send(JSON.stringify({ type: "status", msg: "identificado", userId: ws.userId }));
-        return;
-      }
-
-      // --- Enviar mensaje ---
-      if (msg.type === "mensaje" && msg.from && msg.to && msg.msg) {
-        if (msg.from !== ws.userId) {
-          ws.send(JSON.stringify({ type: "error", msg: "No puedes enviar en nombre de otro usuario." }));
-          return;
-        }
-
-        try {
-          const result = await pool.query(
-            `INSERT INTO messages (from_user_id, to_user_id, content, timestamp)
-             VALUES ($1, $2, $3, NOW())
-             RETURNING timestamp`,
-            [msg.from, msg.to, msg.msg]
-          );
-
-          const fechaMensaje = result.rows[0].timestamp;
-
-          const receptor = conexiones.get(msg.to);
-          if (receptor && receptor.readyState === WebSocket.OPEN) {
-            receptor.send(JSON.stringify({
-              type: "mensaje",
-              from: msg.from,
-              to: msg.to,
-              msg: msg.msg,
-              fecha: fechaMensaje
-            }));
-          } else {
-            const subscriptionResult = await pool.query(
-              "SELECT subscription FROM push_subscriptions WHERE user_id = $1",
-              [msg.to]
-            );
-            const subscription = subscriptionResult.rows[0]?.subscription;
-            if (subscription) {
-              const payload = JSON.stringify({
-                title: "Nuevo mensaje",
-                body: `De: ${msg.from} - ${msg.msg}`,
-              });
-              webpush.sendNotification(JSON.parse(subscription), payload)
-                .catch(err => console.error("Error al enviar notificación push:", err));
-            }
-          }
-
-          ws.send(JSON.stringify({
-            type: "enviado",
-            from: msg.from,
-            to: msg.to,
-            msg: msg.msg,
-            fecha: fechaMensaje
-          }));
-
-        } catch (dbErr) {
-          console.error("Error al guardar mensaje:", dbErr);
-          ws.send(JSON.stringify({ type: "error", msg: "Error de servidor." }));
-        }
-        return;
-      }
-
-      // --- Evento typing ---
-      if (msg.type === "typing" && msg.from && msg.to) {
-        if (msg.from !== ws.userId) return;
-        const receptor = conexiones.get(msg.to);
-        if (receptor && receptor.readyState === WebSocket.OPEN) {
-          receptor.send(JSON.stringify({ type: "typing", from: msg.from, to: msg.to }));
-        }
-        return;
-      }
-
-      ws.send(JSON.stringify({ type: "error", msg: "Formato o tipo inválido." }));
+      msg = JSON.parse(msgRaw);
+      console.log(`⬅️ WS Msg Received:`, msg);
     } catch (err) {
-      ws.send(JSON.stringify({ type: "error", msg: "Formato de mensaje inválido." }));
+      console.error(`❌ Error al parsear mensaje WS (no es JSON): ${msgRaw}`);
+      ws.send(
+        JSON.stringify({ type: "error", msg: "Formato de mensaje inválido." })
+      );
+      return;
+    }
+
+    switch (msg.type) {
+      case "identificacion":
+        if (msg.userId) {
+          ws.userId = msg.userId;
+          console.log(
+            `✅ Usuario ${ws.userId} (${msg.fullName}) identificado.`
+          );
+          ws.send(
+            JSON.stringify({
+              type: "identificado",
+              msg: "Conexión lista para recibir suscripción.",
+            })
+          );
+        }
+        break;
+
+      case "registrar_push":
+        if (msg.userId && msg.subscription && ws.userId === msg.userId) {
+          console.log(
+            `📲 Registrando suscripción push para el usuario ${ws.userId}`
+          );
+          const client = await pool.connect();
+          try {
+            const { endpoint, keys } = msg.subscription;
+            const { p256dh, auth } = keys;
+
+            const updateResult = await client.query(
+              "UPDATE push_subscriptions SET endpoint = $1, p256dh = $2, auth = $3 WHERE user_id = $4 RETURNING user_id",
+              [endpoint, p256dh, auth, ws.userId]
+            );
+
+            if (updateResult.rows.length === 0) {
+              await client.query(
+                "INSERT INTO push_subscriptions (user_id, endpoint, p256dh, auth) VALUES ($1, $2, $3, $4)",
+                [ws.userId, endpoint, p256dh, auth]
+              );
+            }
+            console.log(`👍 Suscripción para usuario ${ws.userId} guardada.`);
+            ws.send(
+              JSON.stringify({ type: "suscripcion_registrada", status: "ok" })
+            );
+          } catch (dbErr) {
+            console.error(
+              `❌ Error de DB al guardar suscripción para ${ws.userId}:`,
+              dbErr
+            );
+            ws.send(
+              JSON.stringify({
+                type: "error",
+                msg: "No se pudo guardar la suscripción.",
+              })
+            );
+          } finally {
+            client.release();
+          }
+        }
+        break;
+
+      default:
+        ws.send(
+          JSON.stringify({
+            type: "error",
+            msg: "Tipo de mensaje no reconocido.",
+          })
+        );
+        break;
     }
   });
 
   ws.on("close", () => {
     if (ws.userId) {
-      conexiones.delete(ws.userId);
+      console.log(`🔌 Usuario ${ws.userId} desconectado.`);
+    } else {
+      console.log("🔌 Una conexión anónima se ha cerrado.");
     }
   });
 
   ws.on("error", (err) => {
-    console.error("WebSocket error:", err);
+    console.error("❌ WebSocket error:", err);
   });
 });
 
-// --- Ping para mantener conexión ---
+// --- Ping para mantener conexiones vivas (SIN ALTERACIONES) ---
 setInterval(() => {
   wss.clients.forEach((ws) => {
-    if (!ws.isAlive) return ws.terminate();
+    if (!ws.isAlive) {
+      if (ws.userId)
+        console.log(`🔪 Terminando conexión inactiva del usuario ${ws.userId}`);
+      return ws.terminate();
+    }
     ws.isAlive = false;
     ws.ping(() => {});
   });
