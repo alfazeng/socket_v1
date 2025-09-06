@@ -8,18 +8,17 @@ const admin = require("firebase-admin");
 
 // --- 2. Se inicializa el SDK de Firebase Admin ---
 // Este código buscará las credenciales en las variables de entorno de Render
+// --- INICIALIZACIÓN DE FIREBASE ADMIN (MODIFICADA) ---
 try {
+  // Ahora usamos admin.credential.cert() para apuntar directamente al Secret File
   admin.initializeApp({
-    credential: admin.credential.applicationDefault(),
+    credential: admin.credential.cert('/etc/secrets/credentials.json'),
   });
-  console.log("✅ Firebase Admin SDK inicializado correctamente.");
+  console.log("✅ Firebase Admin SDK inicializado correctamente desde el Secret File.");
 } catch (error) {
   console.error("❌ Error al inicializar Firebase Admin SDK:", error);
-  console.log(
-    "Asegúrate de que la variable de entorno GOOGLE_APPLICATION_CREDENTIALS esté configurada en Render."
-  );
+  console.log("Asegúrate de que el Secret File 'credentials.json' exista en Render.");
 }
-
 // --- Configuración de la Base de Datos (sin cambios) ---
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
