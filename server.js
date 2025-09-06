@@ -3,12 +3,25 @@ const WebSocket = require("ws");
 const http = require("http");
 const { Pool } = require("pg");
 const cors = require("cors");
-const jwt = require("jsonwebtoken"); // <-- AÑADIDO: Para autenticar el nuevo endpoint
+// --- 1. Se importa firebase-admin y se elimina jsonwebtoken ---
+const admin = require("firebase-admin");
 
-// --- CLAVE SECRETA PARA JWT ---
-const JWT_SECRET = process.env.JWT_SECRET || "tu_secreto_muy_seguro_y_largo";
+// --- 2. Se inicializa el SDK de Firebase Admin ---
+// Asegúrate de que tu variable de entorno GOOGLE_APPLICATION_CREDENTIALS
+// esté configurada en tu servidor de Render.
+try {
+  admin.initializeApp({
+    credential: admin.credential.applicationDefault(),
+  });
+  console.log("✅ Firebase Admin SDK inicializado correctamente.");
+} catch (error) {
+  console.error("❌ Error al inicializar Firebase Admin SDK:", error);
+  console.log(
+    "Asegúrate de que la variable de entorno GOOGLE_APPLICATION_CREDENTIALS esté configurada."
+  );
+}
 
-// --- Configuración de la Base de Datos ---
+// --- Configuración de la Base de Datos (sin cambios) ---
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
   ssl: { rejectUnauthorized: false },
@@ -19,40 +32,59 @@ pool
   .then(() => console.log("✅ Conectado a la base de datos PostgreSQL"))
   .catch((err) => console.error("❌ Error de conexión a la DB:", err.stack));
 
-// --- Inicialización del Servidor ---
+// --- Inicialización del Servidor (sin cambios) ---
 const PORT = process.env.PORT || 10000;
 const app = express();
 app.use(cors());
-app.use(express.json()); // <-- AÑADIDO: Middleware para que Express entienda JSON en las peticiones POST
+app.use(express.json());
 
 // =================================================================================
-// --- MIDDLEWARE DE AUTENTICACIÓN (NUEVO) ---
+// --- 3. MIDDLEWARE DE AUTENTICACIÓN (ACTUALIZADO CON FIREBASE) ---
 // =================================================================================
-// Este middleware protegerá nuestro nuevo endpoint y nos dará acceso a req.user
-const authenticateToken = (req, res, next) => {
+const authenticateToken = async (req, res, next) => {
   const authHeader = req.headers.authorization;
   const token = authHeader && authHeader.split(" ")[1];
 
   if (token == null) return res.sendStatus(401); // No hay token
 
-  jwt.verify(token, JWT_SECRET, (err, user) => {
-    if (err) return res.sendStatus(403); // Token inválido
-    req.user = user;
+  try {
+    // Se verifica el token usando Firebase Admin
+    const decodedToken = await admin.auth().verifyIdToken(token);
+
+    // Se busca el ID interno del usuario en la base de datos usando el email del token
+    const userResult = await pool.query(
+      "SELECT id FROM usuarios WHERE correo = $1",
+      [decodedToken.email]
+    );
+
+    if (userResult.rows.length === 0) {
+      // Si el usuario existe en Firebase pero no en tu DB, se rechaza
+      return res
+        .status(404)
+        .json({ error: "Usuario no encontrado en la base de datos." });
+    }
+
+    // Se añade el ID interno del usuario al objeto de la petición para uso en otros endpoints
+    req.user = { id: userResult.rows[0].id };
     next();
-  });
+  } catch (error) {
+    console.error(
+      "Error en la verificación del token de Firebase:",
+      error.code
+    );
+    return res.sendStatus(403); // Token inválido o expirado
+  }
 };
 
 // =================================================================================
 // --- ENDPOINTS DE API REST ---
 // =================================================================================
 
-// Endpoint de salud para verificar que el servidor está vivo
 app.get("/", (req, res) => {
   res.send("WebSocket Subscription Server is running.");
 });
 
-// --- NUEVO ENDPOINT PARA LA LÓGICA DEL CERBOT ---
-// Es llamado por el ChatModal del frontend
+// Este endpoint ahora funcionará correctamente gracias al middleware actualizado
 app.post("/api/cerbot/message", authenticateToken, async (req, res) => {
   const { sellerId, message } = req.body;
 
@@ -94,7 +126,7 @@ app.post("/api/cerbot/message", authenticateToken, async (req, res) => {
   }
 });
 
-// --- INICIO DEL SERVIDOR HTTP Y WEBSOCKET ---
+// --- INICIO DEL SERVIDOR HTTP Y WEBSOCKET (sin cambios) ---
 const server = http.createServer(app);
 const wss = new WebSocket.Server({ server });
 
