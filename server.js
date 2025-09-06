@@ -64,44 +64,64 @@ app.get("/", (req, res) => {
   res.send("WebSocket Subscription Server is running.");
 });
 
-// --- ENDPOINT DE RAZONAMIENTO ---
+// --- ENDPOINT DE RAZONAMIENTO DEL CERBOT (ACTUALIZADO) ---
 app.post("/api/cerbot/message", authenticateToken, async (req, res) => {
   const { sellerId, message } = req.body;
+
   if (!sellerId || !message) {
     return res.status(400).json({ error: "Faltan sellerId o message." });
   }
+
   try {
     const sellerCheck = await pool.query(
       "SELECT cerbot_activo FROM usuarios WHERE id = $1",
       [sellerId]
     );
     const isCerbotActive = sellerCheck.rows[0]?.cerbot_activo;
+
+    // --- LÓGICA ACTUALIZADA ---
     if (isCerbotActive) {
-      const n8nReasoningWebhook =
-        "https://n8n.chatcerexapp.com/webhook/api_chappie/asistente_cerbot";
-      const n8nResponse = await fetch(n8nReasoningWebhook, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ sellerId: sellerId, user_question: message }),
-      });
-      if (!n8nResponse.ok) {
-        throw new Error("Error en la comunicación con el servicio de IA.");
+      const n8nReasoningWebhook = "https://n8n.chatcerexapp.com/webhook/api_chappie/asistente_cerbot";
+      
+      // Se envuelve la llamada a n8n en su propio try...catch para manejar errores de red
+      try {
+        const n8nResponse = await fetch(n8nReasoningWebhook, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ sellerId: sellerId, user_question: message }),
+        });
+
+        if (!n8nResponse.ok) {
+          // Si n8n devuelve un error (ej. 404, 500), se lanza una excepción
+          throw new Error(`El servicio de IA respondió con el estado: ${n8nResponse.status}`);
+        }
+
+        const responseData = await n8nResponse.json();
+        
+        // Se reenvía la respuesta del LLM al frontend
+        res.json({
+          botResponse: responseData.respuesta || "No pude procesar la respuesta en este momento.",
+        });
+
+      } catch (n8nError) {
+        // Si la llamada a n8n falla, se devuelve un mensaje de error específico
+        console.error("Error al contactar el webhook de n8n:", n8nError);
+        res.status(500).json({ botResponse: "Lo siento, mi asistente de IA no está disponible en este momento. Intenta más tarde." });
       }
-      const responseData = await n8nResponse.json();
-      res.json({
-        botResponse: responseData.respuesta || "No pude procesar la respuesta.",
-      });
     } else {
+      // La lógica para la respuesta fija no cambia
       res.json({
         botResponse:
           "Este usuario no ha configurado su Cerbot a detalle, sin embargo estoy aquí para brindarte apoyo sobre esta publicación. Lo más seguro es que lo que estás buscando se resuelva escribiéndole directamente por WhatsApp. 📲 Toca el botón verde que aparece abajo para chatear directamente con el vendedor.",
       });
     }
   } catch (error) {
-    console.error("Error en el endpoint del Cerbot:", error);
+    // Este catch ahora maneja principalmente errores de la consulta a la tabla 'usuarios'
+    console.error("Error en el endpoint del Cerbot (consulta inicial):", error);
     res.status(500).json({ error: "Error interno del servidor." });
   }
 });
+
 
 // --- ENDPOINTS PARA EL ENTRENAMIENTO GUIADO ---
 app.get("/api/cerbot/knowledge", authenticateToken, async (req, res) => {
