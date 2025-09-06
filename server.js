@@ -5,7 +5,7 @@ const { Pool } = require("pg");
 const cors = require("cors");
 const admin = require("firebase-admin");
 
-// --- INICIALIZACIÓN DE FIREBASE ADMIN (Correcta, sin cambios) ---
+// --- INICIALIZACIÓN DE FIREBASE ADMIN ---
 try {
   admin.initializeApp({
     credential: admin.credential.cert("/etc/secrets/credentials.json"),
@@ -17,7 +17,7 @@ try {
   console.error("❌ Error al inicializar Firebase Admin SDK:", error);
 }
 
-// --- CONFIGURACIÓN DE LA BASE DE DATOS (Sin cambios) ---
+// --- CONFIGURACIÓN DE LA BASE DE DATOS ---
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
   ssl: { rejectUnauthorized: false },
@@ -28,13 +28,13 @@ pool
   .then(() => console.log("✅ Conectado a la base de datos PostgreSQL"))
   .catch((err) => console.error("❌ Error de conexión a la DB:", err.stack));
 
-// --- INICIALIZACIÓN DEL SERVIDOR (Sin cambios) ---
+// --- INICIALIZACIÓN DEL SERVIDOR ---
 const PORT = process.env.PORT || 10000;
 const app = express();
 app.use(cors());
 app.use(express.json());
 
-// --- MIDDLEWARE DE AUTENTICACIÓN (Correcto, sin cambios) ---
+// --- MIDDLEWARE DE AUTENTICACIÓN ---
 const authenticateToken = async (req, res, next) => {
   const authHeader = req.headers.authorization;
   const token = authHeader && authHeader.split(" ")[1];
@@ -57,55 +57,41 @@ const authenticateToken = async (req, res, next) => {
 };
 
 // =================================================================================
-// --- ENDPOINTS DE API REST (ACTUALIZADOS) ---
+// --- ENDPOINTS DE API REST ---
 // =================================================================================
 
 app.get("/", (req, res) => {
   res.send("WebSocket Subscription Server is running.");
 });
 
-// --- ENDPOINT DE RAZONAMIENTO (MODIFICADO) ---
+// --- ENDPOINT DE RAZONAMIENTO ---
 app.post("/api/cerbot/message", authenticateToken, async (req, res) => {
   const { sellerId, message } = req.body;
-
   if (!sellerId || !message) {
     return res.status(400).json({ error: "Faltan sellerId o message." });
   }
-
   try {
     const sellerCheck = await pool.query(
       "SELECT cerbot_activo FROM usuarios WHERE id = $1",
       [sellerId]
     );
     const isCerbotActive = sellerCheck.rows[0]?.cerbot_activo;
-
     if (isCerbotActive) {
-      // --- LÓGICA NUEVA: LLAMADA AL WEBHOOK DE N8N PARA RAZONAR ---
-      // Reemplaza esta URL con tu webhook de n8n para el razonamiento
       const n8nReasoningWebhook =
         "https://n8n.chatcerexapp.com/webhook/api_chappie/asistente_cerbot";
-
       const n8nResponse = await fetch(n8nReasoningWebhook, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          sellerId: sellerId,
-          user_question: message,
-        }),
+        body: JSON.stringify({ sellerId: sellerId, user_question: message }),
       });
-
       if (!n8nResponse.ok) {
         throw new Error("Error en la comunicación con el servicio de IA.");
       }
-
       const responseData = await n8nResponse.json();
       res.json({
-        botResponse:
-          responseData.respuesta ||
-          "No pude procesar la respuesta en este momento.",
+        botResponse: responseData.respuesta || "No pude procesar la respuesta.",
       });
     } else {
-      // Lógica para la respuesta fija (sin cambios)
       res.json({
         botResponse:
           "Este usuario no ha configurado su Cerbot a detalle, sin embargo estoy aquí para brindarte apoyo sobre esta publicación. Lo más seguro es que lo que estás buscando se resuelva escribiéndole directamente por WhatsApp. 📲 Toca el botón verde que aparece abajo para chatear directamente con el vendedor.",
@@ -117,9 +103,7 @@ app.post("/api/cerbot/message", authenticateToken, async (req, res) => {
   }
 });
 
-// --- NUEVOS ENDPOINTS PARA EL ENTRENAMIENTO GUIADO ---
-
-// 1. OBTENER el conocimiento existente de un usuario
+// --- ENDPOINTS PARA EL ENTRENAMIENTO GUIADO ---
 app.get("/api/cerbot/knowledge", authenticateToken, async (req, res) => {
   const userId = req.user.id;
   try {
@@ -129,20 +113,16 @@ app.get("/api/cerbot/knowledge", authenticateToken, async (req, res) => {
     );
     res.json(knowledge.rows);
   } catch (error) {
-    console.error("Error al obtener conocimiento:", error);
     res.status(500).json({ error: "Error interno del servidor." });
   }
 });
 
-// 2. AÑADIR un nuevo conocimiento (con categoría)
 app.post("/api/cerbot/knowledge", authenticateToken, async (req, res) => {
   const userId = req.user.id;
   const { categoria, pregunta, respuesta } = req.body;
-
   if (!categoria || !pregunta || !respuesta) {
     return res.status(400).json({ error: "Todos los campos son requeridos." });
   }
-
   try {
     const newKnowledge = await pool.query(
       "INSERT INTO cerbot_conocimiento (user_id, categoria, pregunta, respuesta) VALUES ($1, $2, $3, $4) RETURNING *",
@@ -150,12 +130,10 @@ app.post("/api/cerbot/knowledge", authenticateToken, async (req, res) => {
     );
     res.status(201).json(newKnowledge.rows[0]);
   } catch (error) {
-    console.error("Error al añadir conocimiento:", error);
     res.status(500).json({ error: "Error interno del servidor." });
   }
 });
 
-// 3. ELIMINAR un conocimiento
 app.delete("/api/cerbot/knowledge/:id", authenticateToken, async (req, res) => {
   const userId = req.user.id;
   const { id } = req.params;
@@ -165,16 +143,24 @@ app.delete("/api/cerbot/knowledge/:id", authenticateToken, async (req, res) => {
       [id, userId]
     );
     if (deleteResult.rowCount === 0) {
-      return res
-        .status(404)
-        .json({ error: "Registro no encontrado o no autorizado." });
+      return res.status(404).json({ error: "Registro no encontrado." });
     }
     res.status(204).send();
   } catch (error) {
-    console.error("Error al eliminar conocimiento:", error);
     res.status(500).json({ error: "Error interno del servidor." });
   }
 });
+
+// =================================================================================
+// --- INICIO DEL SERVIDOR HTTP Y WEBSOCKET (CORREGIDO) ---
+// =================================================================================
+const server = http.createServer(app);
+const wss = new WebSocket.Server({ server }); // <-- Línea restaurada
+
+server.listen(PORT, () => {
+  console.log(`🚀 Servidor WebSocket iniciado en el puerto: ${PORT}`);
+});
+
 // =================================================================================
 // --- LÓGICA WEBSOCKET PARA NOTIFICACIONES PUSH (SIN ALTERACIONES) ---
 // =================================================================================
