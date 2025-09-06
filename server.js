@@ -7,8 +7,7 @@ const cors = require("cors");
 const admin = require("firebase-admin");
 
 // --- 2. Se inicializa el SDK de Firebase Admin ---
-// Asegúrate de que tu variable de entorno GOOGLE_APPLICATION_CREDENTIALS
-// esté configurada en tu servidor de Render.
+// Este código buscará las credenciales en las variables de entorno de Render
 try {
   admin.initializeApp({
     credential: admin.credential.applicationDefault(),
@@ -17,7 +16,7 @@ try {
 } catch (error) {
   console.error("❌ Error al inicializar Firebase Admin SDK:", error);
   console.log(
-    "Asegúrate de que la variable de entorno GOOGLE_APPLICATION_CREDENTIALS esté configurada."
+    "Asegúrate de que la variable de entorno GOOGLE_APPLICATION_CREDENTIALS esté configurada en Render."
   );
 }
 
@@ -64,7 +63,7 @@ const authenticateToken = async (req, res, next) => {
         .json({ error: "Usuario no encontrado en la base de datos." });
     }
 
-    // Se añade el ID interno del usuario al objeto de la petición para uso en otros endpoints
+    // Se añade el ID interno del usuario al objeto de la petición
     req.user = { id: userResult.rows[0].id };
     next();
   } catch (error) {
@@ -84,7 +83,7 @@ app.get("/", (req, res) => {
   res.send("WebSocket Subscription Server is running.");
 });
 
-// Este endpoint ahora funcionará correctamente gracias al middleware actualizado
+// Este endpoint ahora funcionará correctamente
 app.post("/api/cerbot/message", authenticateToken, async (req, res) => {
   const { sellerId, message } = req.body;
 
@@ -147,9 +146,7 @@ wss.on("connection", (ws) => {
     let msg;
     try {
       msg = JSON.parse(msgRaw);
-      console.log(`⬅️ WS Msg Received:`, msg);
     } catch (err) {
-      console.error(`❌ Error al parsear mensaje WS (no es JSON): ${msgRaw}`);
       ws.send(
         JSON.stringify({ type: "error", msg: "Formato de mensaje inválido." })
       );
@@ -164,36 +161,29 @@ wss.on("connection", (ws) => {
             `✅ Usuario ${ws.userId} (${msg.fullName}) identificado.`
           );
           ws.send(
-            JSON.stringify({
-              type: "identificado",
-              msg: "Conexión lista para recibir suscripción.",
-            })
+            JSON.stringify({ type: "identificado", msg: "Conexión lista." })
           );
         }
         break;
 
       case "registrar_push":
         if (msg.userId && msg.subscription && ws.userId === msg.userId) {
-          console.log(
-            `📲 Registrando suscripción push para el usuario ${ws.userId}`
-          );
+          console.log(`📲 Registrando suscripción push para ${ws.userId}`);
           const client = await pool.connect();
           try {
             const { endpoint, keys } = msg.subscription;
             const { p256dh, auth } = keys;
-
             const updateResult = await client.query(
               "UPDATE push_subscriptions SET endpoint = $1, p256dh = $2, auth = $3 WHERE user_id = $4 RETURNING user_id",
               [endpoint, p256dh, auth, ws.userId]
             );
-
             if (updateResult.rows.length === 0) {
               await client.query(
                 "INSERT INTO push_subscriptions (user_id, endpoint, p256dh, auth) VALUES ($1, $2, $3, $4)",
                 [ws.userId, endpoint, p256dh, auth]
               );
             }
-            console.log(`👍 Suscripción para usuario ${ws.userId} guardada.`);
+            console.log(`👍 Suscripción para ${ws.userId} guardada.`);
             ws.send(
               JSON.stringify({ type: "suscripcion_registrada", status: "ok" })
             );
@@ -229,7 +219,7 @@ wss.on("connection", (ws) => {
     if (ws.userId) {
       console.log(`🔌 Usuario ${ws.userId} desconectado.`);
     } else {
-      console.log("🔌 Una conexión anónima se ha cerrado.");
+      console.log("🔌 Conexión anónima cerrada.");
     }
   });
 
