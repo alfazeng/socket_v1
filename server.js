@@ -127,35 +127,43 @@ app.post("/api/cerbot/knowledge", authenticateToken, async (req, res) => {
     return res.status(400).json({ error: "Todos los campos son requeridos." });
   }
 
-  // Se inicia una conexión con el pool para manejar la transacción
   const client = await pool.connect();
 
   try {
-    // Inicia la transacción
-    await client.query('BEGIN');
+    await client.query("BEGIN");
 
-    // 1. Inserta el nuevo par de pregunta/respuesta en la base de conocimiento
-    const newKnowledgeQuery = "INSERT INTO cerbot_conocimiento (user_id, categoria, pregunta, respuesta) VALUES ($1, $2, $3, $4) RETURNING *";
-    const newKnowledgeResult = await client.query(newKnowledgeQuery, [userId, categoria, pregunta, respuesta]);
+    const newKnowledgeQuery =
+      "INSERT INTO cerbot_conocimiento (user_id, categoria, pregunta, respuesta) VALUES ($1, $2, $3, $4) RETURNING *";
+    const newKnowledgeResult = await client.query(newKnowledgeQuery, [
+      userId,
+      categoria,
+      pregunta,
+      respuesta,
+    ]);
 
-    // 2. Actualiza la tabla de usuarios para activar el Cerbot
-    const updateUserQuery = "UPDATE usuarios SET cerbot_activo = true, cerbot_entrenamiento_completo = true WHERE id = $1";
+    const updateUserQuery =
+      "UPDATE usuarios SET cerbot_activo = true, cerbot_entrenamiento_completo = true WHERE id = $1";
     await client.query(updateUserQuery, [userId]);
 
-    // Si ambas consultas son exitosas, se confirman los cambios
-    await client.query('COMMIT');
+    await client.query("COMMIT");
 
-    // Se devuelve el conocimiento recién creado al frontend
-    res.status(201).json(newKnowledgeResult.rows[0]);
+    // --- SOLUCIÓN: Crear un objeto limpio para la respuesta ---
+    const insertedKnowledge = newKnowledgeResult.rows[0];
+    const responsePayload = {
+      id: insertedKnowledge.id,
+      user_id: insertedKnowledge.user_id,
+      categoria: insertedKnowledge.categoria,
+      pregunta: insertedKnowledge.pregunta,
+      respuesta: insertedKnowledge.respuesta,
+    };
 
+    // Enviar el objeto limpio en lugar del resultado directo de la base de datos
+    res.status(201).json(responsePayload);
   } catch (error) {
-    // Si ocurre algún error en cualquiera de las consultas, se revierten todos los cambios
-    await client.query('ROLLBACK');
+    await client.query("ROLLBACK");
     console.error("Error al guardar conocimiento y activar el Cerbot:", error);
     res.status(500).json({ error: "Error interno del servidor." });
-
   } finally {
-    // Se libera la conexión del cliente de vuelta al pool
     client.release();
   }
 });
