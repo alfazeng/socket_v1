@@ -65,6 +65,9 @@ app.get("/", (req, res) => {
 });
 
 // --- ENDPOINT DE RAZONAMIENTO DEL CERBOT (ACTUALIZADO) ---
+// server.js
+
+// --- ENDPOINT DE RAZONAMIENTO DEL CERBOT (VERSIÓN FINAL Y ROBUSTA) ---
 app.post("/api/cerbot/message", authenticateToken, async (req, res) => {
   const { sellerId, message } = req.body;
 
@@ -77,13 +80,17 @@ app.post("/api/cerbot/message", authenticateToken, async (req, res) => {
       "SELECT cerbot_activo FROM usuarios WHERE id = $1",
       [sellerId]
     );
+    
+    // Si el usuario no existe, sellerCheck.rows será un array vacío.
+    if (sellerCheck.rows.length === 0) {
+        return res.status(404).json({ botResponse: "El vendedor especificado no fue encontrado." });
+    }
+
     const isCerbotActive = sellerCheck.rows[0]?.cerbot_activo;
 
-    // --- LÓGICA ACTUALIZADA ---
     if (isCerbotActive) {
       const n8nReasoningWebhook = "https://n8n.chatcerexapp.com/webhook/api_chappie/asistente_cerbot";
       
-      // Se envuelve la llamada a n8n en su propio try...catch para manejar errores de red
       try {
         const n8nResponse = await fetch(n8nReasoningWebhook, {
           method: "POST",
@@ -92,20 +99,30 @@ app.post("/api/cerbot/message", authenticateToken, async (req, res) => {
         });
 
         if (!n8nResponse.ok) {
-          // Si n8n devuelve un error (ej. 404, 500), se lanza una excepción
           throw new Error(`El servicio de IA respondió con el estado: ${n8nResponse.status}`);
         }
 
-        const responseData = await n8nResponse.json();
-        
-        // Se reenvía la respuesta del LLM al frontend
+        // --- INICIO DE LA MODIFICACIÓN ---
+        // 1. Leemos la respuesta como texto para poder inspeccionarla de forma segura.
+        const responseText = await n8nResponse.text();
+
+        // 2. Verificamos si el texto está vacío. Si lo está, es un error.
+        if (!responseText) {
+            throw new Error("El servicio de IA devolvió una respuesta vacía.");
+        }
+
+        // 3. Solo si tenemos texto, intentamos convertirlo a JSON.
+        const responseData = JSON.parse(responseText);
+        // --- FIN DE LA MODIFICACIÓN ---
+
+        // Reenviamos la respuesta del LLM al frontend
         res.json({
           botResponse: responseData.respuesta || "No pude procesar la respuesta en este momento.",
         });
 
       } catch (n8nError) {
-        // Si la llamada a n8n falla, se devuelve un mensaje de error específico
-        console.error("Error al contactar el webhook de n8n:", n8nError);
+        // Este catch ahora también atrapará el error de respuesta vacía.
+        console.error("Error al contactar o procesar la respuesta de n8n:", n8nError);
         res.status(500).json({ botResponse: "Lo siento, mi asistente de IA no está disponible en este momento. Intenta más tarde." });
       }
     } else {
@@ -116,7 +133,6 @@ app.post("/api/cerbot/message", authenticateToken, async (req, res) => {
       });
     }
   } catch (error) {
-    // Este catch ahora maneja principalmente errores de la consulta a la tabla 'usuarios'
     console.error("Error en el endpoint del Cerbot (consulta inicial):", error);
     res.status(500).json({ error: "Error interno del servidor." });
   }
