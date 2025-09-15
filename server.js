@@ -34,9 +34,7 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 
-// --- MIDDLEWARE DE AUTENTICACIÓN ---
-// ----ACTUALIZAR----
-// --- MIDDLEWARE DE AUTENTICACIÓN ---
+// --- MIDDLEWARE DE AUTENTICACIÓN (ACTUALIZADO) ---
 const authenticateToken = async (req, res, next) => {
   const authHeader = req.headers.authorization;
   const token = authHeader && authHeader.split(" ")[1];
@@ -71,10 +69,7 @@ app.get("/", (req, res) => {
   res.send("WebSocket Subscription Server is running.");
 });
 
-// --- ENDPOINT DE RAZONAMIENTO DEL CERBOT (ACTUALIZADO) ---
-// server.js
-
-// --- ENDPOINT DE RAZONAMIENTO DEL CERBOT (VERSIÓN FINAL Y ROBUSTA) ---
+// --- ENDPOINTS DEL CERBOT (EXISTENTES) ---
 app.post("/api/cerbot/message", authenticateToken, async (req, res) => {
   const { sellerId, message } = req.body;
 
@@ -87,53 +82,57 @@ app.post("/api/cerbot/message", authenticateToken, async (req, res) => {
       "SELECT cerbot_activo FROM usuarios WHERE id = $1",
       [sellerId]
     );
-    
-    // Si el usuario no existe, sellerCheck.rows será un array vacío.
+
     if (sellerCheck.rows.length === 0) {
-        return res.status(404).json({ botResponse: "El vendedor especificado no fue encontrado." });
+      return res
+        .status(404)
+        .json({ botResponse: "El vendedor especificado no fue encontrado." });
     }
 
     const isCerbotActive = sellerCheck.rows[0]?.cerbot_activo;
 
     if (isCerbotActive) {
-      const n8nReasoningWebhook = "https://n8n.chatcerexapp.com/webhook/api_chappie/asistente_cerbot";
-      
+      const n8nReasoningWebhook =
+        "https://n8n.chatcerexapp.com/webhook/api_chappie/asistente_cerbot";
+
       try {
         const n8nResponse = await fetch(n8nReasoningWebhook, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ sellerId: sellerId, user_question: message }),
+          body: JSON.stringify({
+            sellerId: sellerId,
+            user_question: message,
+          }),
         });
 
         if (!n8nResponse.ok) {
-          throw new Error(`El servicio de IA respondió con el estado: ${n8nResponse.status}`);
+          throw new Error(
+            `El servicio de IA respondió con el estado: ${n8nResponse.status}`
+          );
         }
 
-        // --- INICIO DE LA MODIFICACIÓN ---
-        // 1. Leemos la respuesta como texto para poder inspeccionarla de forma segura.
         const responseText = await n8nResponse.text();
-
-        // 2. Verificamos si el texto está vacío. Si lo está, es un error.
         if (!responseText) {
-            throw new Error("El servicio de IA devolvió una respuesta vacía.");
+          throw new Error("El servicio de IA devolvió una respuesta vacía.");
         }
-
-        // 3. Solo si tenemos texto, intentamos convertirlo a JSON.
         const responseData = JSON.parse(responseText);
-        // --- FIN DE LA MODIFICACIÓN ---
 
-        // Reenviamos la respuesta del LLM al frontend
         res.json({
-          botResponse: responseData.respuesta || "No pude procesar la respuesta en este momento.",
+          botResponse:
+            responseData.respuesta ||
+            "No pude procesar la respuesta en este momento.",
         });
-
       } catch (n8nError) {
-        // Este catch ahora también atrapará el error de respuesta vacía.
-        console.error("Error al contactar o procesar la respuesta de n8n:", n8nError);
-        res.status(500).json({ botResponse: "Lo siento, mi asistente de IA no está disponible en este momento. Intenta más tarde." });
+        console.error(
+          "Error al contactar o procesar la respuesta de n8n:",
+          n8nError
+        );
+        res.status(500).json({
+          botResponse:
+            "Lo siento, mi asistente de IA no está disponible en este momento. Intenta más tarde.",
+        });
       }
     } else {
-      // La lógica para la respuesta fija no cambia
       res.json({
         botResponse:
           "Este usuario no ha configurado su Cerbot a detalle, sin embargo estoy aquí para brindarte apoyo sobre esta publicación. Lo más seguro es que lo que estás buscando se resuelva escribiéndole directamente por WhatsApp. 📲 Toca el botón verde que aparece abajo para chatear directamente con el vendedor.",
@@ -145,8 +144,6 @@ app.post("/api/cerbot/message", authenticateToken, async (req, res) => {
   }
 });
 
-
-// --- ENDPOINTS PARA EL ENTRENAMIENTO GUIADO ---
 app.get("/api/cerbot/knowledge", authenticateToken, async (req, res) => {
   const userId = req.user.id;
   try {
@@ -160,8 +157,6 @@ app.get("/api/cerbot/knowledge", authenticateToken, async (req, res) => {
   }
 });
 
-// Reemplaza el endpoint existente con esta versión actualizada
-
 app.post("/api/cerbot/knowledge", authenticateToken, async (req, res) => {
   const userId = req.user.id;
   const { categoria, pregunta, respuesta } = req.body;
@@ -171,7 +166,6 @@ app.post("/api/cerbot/knowledge", authenticateToken, async (req, res) => {
   }
 
   const client = await pool.connect();
-
   try {
     await client.query("BEGIN");
 
@@ -190,7 +184,6 @@ app.post("/api/cerbot/knowledge", authenticateToken, async (req, res) => {
 
     await client.query("COMMIT");
 
-    // --- SOLUCIÓN: Crear un objeto limpio para la respuesta ---
     const insertedKnowledge = newKnowledgeResult.rows[0];
     const responsePayload = {
       id: insertedKnowledge.id,
@@ -200,7 +193,6 @@ app.post("/api/cerbot/knowledge", authenticateToken, async (req, res) => {
       respuesta: insertedKnowledge.respuesta,
     };
 
-    // Enviar el objeto limpio en lugar del resultado directo de la base de datos
     res.status(201).json(responsePayload);
   } catch (error) {
     await client.query("ROLLBACK");
@@ -211,26 +203,28 @@ app.post("/api/cerbot/knowledge", authenticateToken, async (req, res) => {
   }
 });
 
-
-app.delete("/api/cerbot/knowledge/:id", authenticateToken, async (req, res) => {
-  const userId = req.user.id;
-  const { id } = req.params;
-  try {
-    const deleteResult = await pool.query(
-      "DELETE FROM cerbot_conocimiento WHERE id = $1 AND user_id = $2",
-      [id, userId]
-    );
-    if (deleteResult.rowCount === 0) {
-      return res.status(404).json({ error: "Registro no encontrado." });
+app.delete(
+  "/api/cerbot/knowledge/:id",
+  authenticateToken,
+  async (req, res) => {
+    const userId = req.user.id;
+    const { id } = req.params;
+    try {
+      const deleteResult = await pool.query(
+        "DELETE FROM cerbot_conocimiento WHERE id = $1 AND user_id = $2",
+        [id, userId]
+      );
+      if (deleteResult.rowCount === 0) {
+        return res.status(404).json({ error: "Registro no encontrado." });
+      }
+      res.status(204).send();
+    } catch (error) {
+      res.status(500).json({ error: "Error interno del servidor." });
     }
-    res.status(204).send();
-  } catch (error) {
-    res.status(500).json({ error: "Error interno del servidor." });
   }
-});
+);
 
-// ----NUEVO----
-// --- ENDPOINTS PARA EL FLUJO DE CRM ---
+// --- ENDPOINTS PARA EL FLUJO DE CRM (NUEVOS) ---
 
 // Endpoint 1: Obtener la lista de usuarios interesados en una publicación
 app.get(
@@ -311,7 +305,7 @@ app.post("/api/promociones/enviar", authenticateToken, async (req, res) => {
         });
     }
 
-    // 2. Preparar el payload del mensaje
+    // 2. Preparar el payload del mensaje para el WebSocket
     const notificationPayload = {
       type: "promotional_message",
       payload: {
@@ -375,17 +369,17 @@ app.post("/api/promociones/enviar", authenticateToken, async (req, res) => {
 });
 
 // =================================================================================
-// --- INICIO DEL SERVIDOR HTTP Y WEBSOCKET (CORREGIDO) ---
+// --- INICIO DEL SERVIDOR HTTP Y WEBSOCKET ---
 // =================================================================================
 const server = http.createServer(app);
-const wss = new WebSocket.Server({ server }); // <-- Línea restaurada
+const wss = new WebSocket.Server({ server });
 
 server.listen(PORT, () => {
   console.log(`🚀 Servidor WebSocket iniciado en el puerto: ${PORT}`);
 });
 
 // =================================================================================
-// --- LÓGICA WEBSOCKET PARA NOTIFICACIONES PUSH (SIN ALTERACIONES) ---
+// --- LÓGICA WEBSOCKET PARA NOTIFICACIONES ---
 // =================================================================================
 wss.on("connection", (ws) => {
   ws.isAlive = true;
@@ -479,7 +473,7 @@ wss.on("connection", (ws) => {
   });
 });
 
-// --- Ping para mantener conexiones vivas (SIN ALTERACIONES) ---
+// --- Ping para mantener conexiones vivas ---
 setInterval(() => {
   wss.clients.forEach((ws) => {
     if (!ws.isAlive) {
