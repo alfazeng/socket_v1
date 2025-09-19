@@ -70,6 +70,8 @@ app.get("/", (req, res) => {
 });
 
 // --- ENDPOINTS DEL CERBOT (EXISTENTES) ---
+// En tu server.js, reemplaza el endpoint /api/cerbot/message completo
+
 app.post("/api/cerbot/message", authenticateToken, async (req, res) => {
   const { sellerId, message } = req.body;
 
@@ -95,7 +97,16 @@ app.post("/api/cerbot/message", authenticateToken, async (req, res) => {
       const n8nReasoningWebhook =
         "https://n8n.chatcerexapp.com/webhook/api_chappie/asistente_cerbot";
 
+      // --- INICIO DE LA SOLUCIÓN ---
+      // 1. Creamos un AbortController para manejar el timeout.
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => {
+        console.log(`[CERBOT_TIMEOUT] La solicitud a n8n ha superado los 15 segundos. Cancelando...`);
+        controller.abort();
+      }, 15000); // 15 segundos de tiempo de espera
+
       try {
+        console.log(`[CERBOT_LOG] Realizando llamada a n8n con un timeout de 15s.`);
         const n8nResponse = await fetch(n8nReasoningWebhook, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
@@ -103,7 +114,12 @@ app.post("/api/cerbot/message", authenticateToken, async (req, res) => {
             sellerId: sellerId,
             user_question: message,
           }),
+          // 2. Asociamos la señal del controller a nuestra petición.
+          signal: controller.signal, 
         });
+
+        // 3. Si la respuesta llega a tiempo, limpiamos el timeout.
+        clearTimeout(timeoutId);
 
         if (!n8nResponse.ok) {
           throw new Error(
@@ -122,20 +138,31 @@ app.post("/api/cerbot/message", authenticateToken, async (req, res) => {
             responseData.respuesta ||
             "No pude procesar la respuesta en este momento.",
         });
+
       } catch (n8nError) {
-        console.error(
-          "Error al contactar o procesar la respuesta de n8n:",
-          n8nError
-        );
-        res.status(500).json({
-          botResponse:
-            "Lo siento, mi asistente de IA no está disponible en este momento. Intenta más tarde.",
-        });
+        // 4. Limpiamos el timeout aquí también por si hay otros errores.
+        clearTimeout(timeoutId);
+
+        // Si el error es por el abort, es un timeout.
+        if (n8nError.name === 'AbortError') {
+          console.error("Error al contactar a n8n: La solicitud ha caducado (timeout).");
+          res.status(504).json({ // 504 Gateway Timeout es el código correcto
+            botResponse:
+              "Lo siento, mi asistente de IA está tardando mucho en responder. Intenta de nuevo más tarde.",
+          });
+        } else {
+          console.error("Error al contactar o procesar la respuesta de n8n:", n8nError);
+          res.status(500).json({
+            botResponse:
+              "Lo siento, mi asistente de IA no está disponible en este momento.",
+          });
+        }
       }
+      // --- FIN DE LA SOLUCIÓN ---
     } else {
       res.json({
         botResponse:
-          "Este usuario no ha configurado su Cerbot a detalle, sin embargo estoy aquí para brindarte apoyo sobre esta publicación. Lo más seguro es que lo que estás buscando se resuelva escribiéndole directamente por WhatsApp. 📲 Toca el botón verde que aparece abajo para chatear directamente con el vendedor.",
+          "Este usuario no ha configurado su Cerbot a detalle...",
       });
     }
   } catch (error) {
