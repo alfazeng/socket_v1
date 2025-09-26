@@ -6,6 +6,8 @@ const cors = require("cors");
 const admin = require("firebase-admin");
 const fs = require('fs');
 
+const SERVICE_ACCOUNT_PATH = '/etc/secrets/credentials.json';
+
 // --- INICIO DEL CÓDIGO DE DIAGNÓSTICO ---
 console.log("--- INICIANDO DIAGNÓSTICO DE CREDENCIALES DE FIREBASE ---");
 const creds_path = process.env.GOOGLE_APPLICATION_CREDENTIALS;
@@ -28,14 +30,21 @@ console.log("--- FIN DEL DIAGNÓSTICO DE CREDENCIALES ---");
 
 // --- INICIALIZACIÓN DE FIREBASE ADMIN ---
 try {
-  admin.initializeApp({
-    credential: admin.credential.cert("/etc/secrets/credentials.json"),
-  });
-  console.log(
-    "✅ Firebase Admin SDK inicializado correctamente desde el Secret File."
-  );
+  // Verificamos si el archivo de credenciales existe en la ruta de Render
+  if (require('fs').existsSync(SERVICE_ACCOUNT_PATH)) {
+    admin.initializeApp({
+      credential: admin.credential.cert(SERVICE_ACCOUNT_PATH),
+    });
+    console.log("✅ Firebase Admin SDK inicializado correctamente desde el Secret File.");
+  } else {
+    // Fallback para desarrollo local (si usas un archivo local)
+    admin.initializeApp({
+      credential: admin.credential.applicationDefault(),
+    });
+    console.log("✅ Firebase Admin SDK inicializado correctamente desde credenciales locales.");
+  }
 } catch (error) {
-  console.error("❌ Error al inicializar Firebase Admin SDK:", error);
+  console.error("🔥 Error al inicializar Firebase Admin SDK:", error);
 }
 
 // --- CONFIGURACIÓN DE LA BASE DE DATOS ---
