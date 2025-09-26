@@ -4,6 +4,27 @@ const http = require("http");
 const { Pool } = require("pg");
 const cors = require("cors");
 const admin = require("firebase-admin");
+const fs = require('fs');
+
+// --- INICIO DEL CÓDIGO DE DIAGNÓSTICO ---
+console.log("--- INICIANDO DIAGNÓSTICO DE CREDENCIALES DE FIREBASE ---");
+const creds_path = process.env.GOOGLE_APPLICATION_CREDENTIALS;
+console.log(`[DIAGNÓSTICO] La variable GOOGLE_APPLICATION_CREDENTIALS apunta a: ${creds_path}`);
+
+if (creds_path && fs.existsSync(creds_path)) {
+  try {
+    const creds_content = fs.readFileSync(creds_path, 'utf8');
+    const creds_json = JSON.parse(creds_content);
+    console.log(`[DIAGNÓSTICO] project_id en el archivo: ${creds_json.project_id}`);
+    console.log(`[DIAGNÓSTICO] client_email en el archivo: ${creds_json.client_email}`);
+  } catch (e) {
+    console.error("[DIAGNÓSTICO] ¡ERROR! No se pudo leer o procesar el archivo de credenciales:", e);
+  }
+} else {
+  console.log("[DIAGNÓSTICO] ¡ADVERTENCIA! La ruta de credenciales no existe o la variable no está definida.");
+}
+console.log("--- FIN DEL DIAGNÓSTICO DE CREDENCIALES ---");
+// --- FIN DEL CÓDIGO DE DIAGNÓSTICO ---
 
 // --- INICIALIZACIÓN DE FIREBASE ADMIN ---
 try {
