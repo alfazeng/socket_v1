@@ -6,46 +6,47 @@ const cors = require("cors");
 const admin = require("firebase-admin");
 const fs = require('fs');
 
-const SERVICE_ACCOUNT_PATH = '/etc/secrets/credentials.json';
+// --- INICIO DEL NUEVO BLOQUE DE DIAGNÓSTICO ---
+console.log("--- INICIANDO DIAGNÓSTICO PROFUNDO DEL ENTORNO DE RENDER ---");
 
-// --- INICIO DEL CÓDIGO DE DIAGNÓSTICO ---
-console.log("--- INICIANDO DIAGNÓSTICO DE CREDENCIALES DE FIREBASE ---");
-const creds_path = process.env.GOOGLE_APPLICATION_CREDENTIALS;
-console.log(`[DIAGNÓSTICO] La variable GOOGLE_APPLICATION_CREDENTIALS apunta a: ${creds_path}`);
+const secretPath = '/etc/secrets';
+const secretFile = 'credentials.json';
+const fullPath = `${secretPath}/${secretFile}`;
 
-if (creds_path && fs.existsSync(creds_path)) {
-  try {
-    const creds_content = fs.readFileSync(creds_path, 'utf8');
-    const creds_json = JSON.parse(creds_content);
-    console.log(`[DIAGNÓSTICO] project_id en el archivo: ${creds_json.project_id}`);
-    console.log(`[DIAGNÓSTICO] client_email en el archivo: ${creds_json.client_email}`);
-  } catch (e) {
-    console.error("[DIAGNÓSTICO] ¡ERROR! No se pudo leer o procesar el archivo de credenciales:", e);
-  }
-} else {
-  console.log("[DIAGNÓSTICO] ¡ADVERTENCIA! La ruta de credenciales no existe o la variable no está definida.");
-}
-console.log("--- FIN DEL DIAGNÓSTICO DE CREDENCIALES ---");
-// --- FIN DEL CÓDIGO DE DIAGNÓSTICO ---
+console.log(`[DIAGNÓSTICO] Buscando el archivo: ${fullPath}`);
 
-// --- INICIALIZACIÓN DE FIREBASE ADMIN ---
 try {
-  // Verificamos si el archivo de credenciales existe en la ruta de Render
-  if (require('fs').existsSync(SERVICE_ACCOUNT_PATH)) {
-    admin.initializeApp({
-      credential: admin.credential.cert(SERVICE_ACCOUNT_PATH),
-    });
-    console.log("✅ Firebase Admin SDK inicializado correctamente desde el Secret File.");
+  // 1. Verificamos si la carpeta de secretos existe.
+  if (fs.existsSync(secretPath)) {
+    console.log(`[DIAGNÓSTICO] La carpeta de secretos '${secretPath}' SÍ existe.`);
+    
+    // 2. Listamos el contenido de la carpeta.
+    const files = fs.readdirSync(secretPath);
+    console.log(`[DIAGNÓSTICO] Contenido de '${secretPath}': [${files.join(', ')}]`);
+
+    // 3. Verificamos si nuestro archivo específico existe.
+    if (fs.existsSync(fullPath)) {
+      console.log(`[DIAGNÓSTICO] El archivo '${fullPath}' SÍ fue encontrado.`);
+      // Opcional: Leer el project_id para una última confirmación.
+      try {
+        const creds_content = fs.readFileSync(fullPath, 'utf8');
+        const creds_json = JSON.parse(creds_content);
+        console.log(`[DIAGNÓSTICO] project_id en el archivo: ${creds_json.project_id}`);
+      } catch (e) {
+        console.error("[DIAGNÓSTICO] ERROR al leer el contenido del JSON.");
+      }
+    } else {
+      console.error(`[DIAGNÓSTICO] ¡ERROR CRÍTICO! El archivo '${fullPath}' NO fue encontrado dentro de la carpeta de secretos.`);
+    }
+
   } else {
-    // Fallback para desarrollo local (si usas un archivo local)
-    admin.initializeApp({
-      credential: admin.credential.applicationDefault(),
-    });
-    console.log("✅ Firebase Admin SDK inicializado correctamente desde credenciales locales.");
+    console.error(`[DIAGNÓSTICO] ¡ERROR CRÍTICO! La carpeta de secretos '${secretPath}' NO existe en este entorno.`);
   }
-} catch (error) {
-  console.error("🔥 Error al inicializar Firebase Admin SDK:", error);
+} catch (e) {
+  console.error("[DIAGNÓSTICO] Ocurrió un error general durante el diagnóstico del sistema de archivos:", e);
 }
+console.log("--- FIN DEL DIAGNÓSTICO ---");
+// --- FIN DEL NUEVO BLOQUE DE DIAGNÓSTICO ---
 
 // --- CONFIGURACIÓN DE LA BASE DE DATOS ---
 const pool = new Pool({
