@@ -6,47 +6,24 @@ const cors = require("cors");
 const admin = require("firebase-admin");
 const fs = require('fs');
 
-// --- INICIO DEL NUEVO BLOQUE DE DIAGNÓSTICO ---
-console.log("--- INICIANDO DIAGNÓSTICO PROFUNDO DEL ENTORNO DE RENDER ---");
+// --- INICIALIZACIÓN DE FIREBASE ADMIN (VERSIÓN FINAL Y ROBUSTA) ---
 
-const secretPath = '/etc/secrets';
-const secretFile = 'credentials.json';
-const fullPath = `${secretPath}/${secretFile}`;
-
-console.log(`[DIAGNÓSTICO] Buscando el archivo: ${fullPath}`);
+// Definimos la ruta donde Render coloca el archivo de secretos.
+const SERVICE_ACCOUNT_PATH = '/etc/secrets/credentials.json';
 
 try {
-  // 1. Verificamos si la carpeta de secretos existe.
-  if (fs.existsSync(secretPath)) {
-    console.log(`[DIAGNÓSTICO] La carpeta de secretos '${secretPath}' SÍ existe.`);
-    
-    // 2. Listamos el contenido de la carpeta.
-    const files = fs.readdirSync(secretPath);
-    console.log(`[DIAGNÓSTICO] Contenido de '${secretPath}': [${files.join(', ')}]`);
-
-    // 3. Verificamos si nuestro archivo específico existe.
-    if (fs.existsSync(fullPath)) {
-      console.log(`[DIAGNÓSTICO] El archivo '${fullPath}' SÍ fue encontrado.`);
-      // Opcional: Leer el project_id para una última confirmación.
-      try {
-        const creds_content = fs.readFileSync(fullPath, 'utf8');
-        const creds_json = JSON.parse(creds_content);
-        console.log(`[DIAGNÓSTICO] project_id en el archivo: ${creds_json.project_id}`);
-      } catch (e) {
-        console.error("[DIAGNÓSTICO] ERROR al leer el contenido del JSON.");
-      }
-    } else {
-      console.error(`[DIAGNÓSTICO] ¡ERROR CRÍTICO! El archivo '${fullPath}' NO fue encontrado dentro de la carpeta de secretos.`);
-    }
-
-  } else {
-    console.error(`[DIAGNÓSTICO] ¡ERROR CRÍTICO! La carpeta de secretos '${secretPath}' NO existe en este entorno.`);
-  }
-} catch (e) {
-  console.error("[DIAGNÓSTICO] Ocurrió un error general durante el diagnóstico del sistema de archivos:", e);
+  // Inicializamos la app de Firebase directamente con la ruta del certificado.
+  // Este método es explícito y el más fiable para entornos como Render.
+  admin.initializeApp({
+    credential: admin.credential.cert(SERVICE_ACCOUNT_PATH),
+  });
+  console.log("✅ Firebase Admin SDK inicializado con las credenciales de Render.");
+} catch (error) {
+  console.error("🔥 ¡ERROR CRÍTICO AL INICIALIZAR FIREBASE ADMIN!:", error);
+  // Si esto falla, la aplicación no puede funcionar.
+  // Salimos del proceso para forzar un reinicio y alertar del problema.
+  process.exit(1);
 }
-console.log("--- FIN DEL DIAGNÓSTICO ---");
-// --- FIN DEL NUEVO BLOQUE DE DIAGNÓSTICO ---
 
 // --- CONFIGURACIÓN DE LA BASE DE DATOS ---
 const pool = new Pool({
