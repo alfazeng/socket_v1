@@ -87,6 +87,8 @@ app.get("/", (req, res) => {
 
 // --- ENDPOINTS DE NOTIFICACIONES ---
 
+a// En: websocket_serverjs_subido_en_render/server.js
+
 app.post("/api/subscribe-fcm", authenticateToken, async (req, res) => {
   const userId = req.user.id;
   const { fcmToken } = req.body;
@@ -94,42 +96,47 @@ app.post("/api/subscribe-fcm", authenticateToken, async (req, res) => {
     return res.status(400).json({ error: "No se proporcionó fcmToken." });
   }
 
+  // --- INICIO DE LA LÓGICA DE AUTOCURACIÓN ---
+  const client = await pool.connect();
   try {
-    const query = `
-      INSERT INTO fcm_tokens (user_id, token) 
-      VALUES ($1, $2) 
-      ON CONFLICT (token) DO UPDATE SET user_id = EXCLUDED.user_id;
-    `;
-    await pool.query(query, [userId, fcmToken]);
+    // 1. Iniciamos una transacción para asegurar la integridad de los datos.
+    await client.query('BEGIN');
 
-    // --- INICIO DE LA MODIFICACIÓN ---
+    // 2. Buscamos el estado actual del usuario para la suscripción al tema.
+    const userResult = await client.query('SELECT estado FROM usuarios WHERE id = $1', [userId]);
+    const userState = userResult.rows[0]?.estado;
 
-    // 1. Suscribir siempre al tema general 'all_users'
-    await admin.messaging().subscribeToTopic(fcmToken, "all_users");
-    console.log(`[FCM] Token suscrito al tema 'all_users'`);
-
-    // 2. Suscribir al tema del estado actual del usuario, si lo tiene
-    const userStateResult = await pool.query(
-      "SELECT estado FROM usuarios WHERE id = $1",
-      [userId]
-    );
-    if (userStateResult.rows.length > 0 && userStateResult.rows[0].estado) {
-      const state = userStateResult.rows[0].estado;
-      // Limpiamos el nombre del estado para que sea un nombre de tema válido
-      const topicName = `state_${state.replace(/[^a-zA-Z0-9-_.~%]/g, "_")}`;
-      await admin.messaging().subscribeToTopic(fcmToken, topicName);
-      console.log(`[FCM] Token suscrito al tema de estado: ${topicName}`);
+    // 3. Eliminamos CUALQUIER token antiguo asociado a este usuario.
+    // Esto limpia duplicados y maneja el caso de que el usuario cambie de dispositivo.
+    const deleteResult = await client.query('DELETE FROM fcm_tokens WHERE user_id = $1', [userId]);
+    if (deleteResult.rowCount > 0) {
+      console.log(`[FCM Cleanup] Se eliminaron ${deleteResult.rowCount} tokens antiguos para el usuario ${userId}.`);
     }
 
-    // --- FIN DE LA MODIFICACIÓN ---
+    // 4. Insertamos el nuevo y único token.
+    await client.query('INSERT INTO fcm_tokens (user_id, token) VALUES ($1, $2)', [userId, fcmToken]);
+    console.log(`[FCM] Token nuevo guardado para el usuario ${userId}.`);
+    
+    // 5. Finalizamos la transacción.
+    await client.query('COMMIT');
 
-    res
-      .status(200)
-      .json({ message: "Suscripción FCM guardada y temas actualizados." });
+    // 6. Suscribimos el nuevo token a los temas correspondientes.
+    await admin.messaging().subscribeToTopic(fcmToken, 'all_users');
+    if (userState) {
+        const topicName = `state_${userState.replace(/[^a-zA-Z0-9-_.~%]/g, '_')}`;
+        await admin.messaging().subscribeToTopic(fcmToken, topicName);
+    }
+
+    res.status(200).json({ message: "Suscripción FCM actualizada y tokens antiguos eliminados." });
+
   } catch (error) {
-    console.error("Error al guardar token y suscribir a temas:", error);
-    res.status(500).send("Error interno");
+    await client.query('ROLLBACK'); // Si algo falla, revertimos todos los cambios.
+    console.error("Error en el proceso de suscripción y limpieza de FCM:", error);
+    res.status(500).send("Error interno del servidor");
+  } finally {
+    client.release(); // Liberamos la conexión a la base de datos.
   }
+  // --- FIN DE LA LÓGICA DE AUTOCURACIÓN ---
 });
 
 // --- ENDPOINTS DEL CERBOT (EXISTENTES) ---
