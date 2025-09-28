@@ -93,82 +93,144 @@ app.post("/api/subscribe-fcm", authenticateToken, async (req, res) => {
   if (!fcmToken) {
     return res.status(400).json({ error: "No se proporcionó fcmToken." });
   }
+
   try {
     const query = `
       INSERT INTO fcm_tokens (user_id, token) 
       VALUES ($1, $2) 
-      ON CONFLICT (token) DO NOTHING;
+      ON CONFLICT (token) DO UPDATE SET user_id = EXCLUDED.user_id;
     `;
     await pool.query(query, [userId, fcmToken]);
-    res.status(200).json({ message: "Suscripción FCM guardada." });
+
+    // --- INICIO DE LA MODIFICACIÓN ---
+
+    // 1. Suscribir siempre al tema general 'all_users'
+    await admin.messaging().subscribeToTopic(fcmToken, "all_users");
+    console.log(`[FCM] Token suscrito al tema 'all_users'`);
+
+    // 2. Suscribir al tema del estado actual del usuario, si lo tiene
+    const userStateResult = await pool.query(
+      "SELECT estado FROM usuarios WHERE id = $1",
+      [userId]
+    );
+    if (userStateResult.rows.length > 0 && userStateResult.rows[0].estado) {
+      const state = userStateResult.rows[0].estado;
+      // Limpiamos el nombre del estado para que sea un nombre de tema válido
+      const topicName = `state_${state.replace(/[^a-zA-Z0-9-_.~%]/g, "_")}`;
+      await admin.messaging().subscribeToTopic(fcmToken, topicName);
+      console.log(`[FCM] Token suscrito al tema de estado: ${topicName}`);
+    }
+
+    // --- FIN DE LA MODIFICACIÓN ---
+
+    res
+      .status(200)
+      .json({ message: "Suscripción FCM guardada y temas actualizados." });
   } catch (error) {
-    console.error("Error al guardar token de FCM:", error);
+    console.error("Error al guardar token y suscribir a temas:", error);
     res.status(500).send("Error interno");
   }
 });
+
 // --- ENDPOINTS DEL CERBOT (EXISTENTES) ---
 // **NUEVO ENDPOINT** para enviar notificaciones desde el panel de administrador
 app.post("/api/notifications/send", authenticateToken, async (req, res) => {
   try {
-      const userCheck = await pool.query("SELECT rol FROM usuarios WHERE id = $1", [req.user.id]);
-      if (userCheck.rows.length === 0 || userCheck.rows[0].rol !== 'admin') {
-          return res.status(403).json({ error: "Acceso denegado. Se requiere rol de administrador." });
-      }
+    const userCheck = await pool.query(
+      "SELECT rol FROM usuarios WHERE id = $1",
+      [req.user.id]
+    );
+    if (userCheck.rows.length === 0 || userCheck.rows[0].rol !== "admin") {
+      return res
+        .status(403)
+        .json({ error: "Acceso denegado. Se requiere rol de administrador." });
+    }
   } catch (e) {
-      return res.status(500).json({ error: "Error al verificar el rol del usuario." });
+    return res
+      .status(500)
+      .json({ error: "Error al verificar el rol del usuario." });
   }
 
   const { title, body, url, image, segments } = req.body;
 
   if (!title || !body || !url) {
-      return res.status(400).json({ error: "Faltan los campos title, body, o url." });
+    return res
+      .status(400)
+      .json({ error: "Faltan los campos title, body, o url." });
   }
 
   try {
-      let query = `SELECT DISTINCT token FROM fcm_tokens ft`;
-      const queryParams = [];
+    // --- INICIO DE LA ACTUALIZACIÓN ---
 
-      if (segments && segments.state) {
-          query += ` JOIN usuarios u ON ft.user_id = u.id WHERE u.estado = $1`;
-          queryParams.push(segments.state);
-      }
+    // 1. Determinar el tema de destino basado en la segmentación.
+    let targetTopic;
+    if (segments && segments.state) {
+      // Si se especifica un estado, se crea un nombre de tema seguro para ese estado.
+      // Ejemplo: "Nueva Esparta" se convierte en "state_Nueva_Esparta"
+      const safeStateName = segments.state.replace(/[^a-zA-Z0-9-_.~%]/g, "_");
+      targetTopic = `state_${safeStateName}`;
+    } else {
+      // Si no hay segmentación, el destino es el tema general para todos los usuarios.
+      targetTopic = "all_users";
+    }
 
-      const tokensResult = await pool.query(query, queryParams);
-      const tokens = tokensResult.rows.map(row => row.token);
+    console.log(`[FCM] Intentando enviar notificación al tema: ${targetTopic}`);
 
-      if (tokens.length === 0) {
-          return res.status(200).json({ message: "No se encontraron suscriptores para notificar." });
-      }
+    // 2. Construir el payload del mensaje para enviar a un tema.
+    const messagePayload = {
+      notification: {
+        title,
+        body,
+        image: image || undefined, // Incluye la imagen solo si se proporciona
+      },
+      webpush: {
+        notification: {
+          icon: "https://chatcerex.com/img/icon-192.png",
+        },
+        fcm_options: {
+          link: url,
+        },
+      },
+      topic: targetTopic, // ¡La clave es usar 'topic' en lugar de 'tokens'!
+    };
 
-      const messagePayload = {
-          notification: { title, body, image: image || undefined },
-          webpush: {
-              notification: { icon: "https://chatcerex.com/img/icon-192.png" },
-              fcm_options: { link: url },
-          },
-          tokens: tokens,
-      };
+    // 3. Usar el método .send() para enviar el mensaje al tema.
+    const response = await admin.messaging().send(messagePayload);
 
-      const response = await admin.messaging().sendMulticast(messagePayload);
-      console.log(`[FCM] Notificaciones enviadas: ${response.successCount} con éxito.`);
+    console.log(
+      `[FCM] Mensaje enviado con éxito al tema '${targetTopic}'. ID del mensaje: ${response}`
+    );
 
-      if (response.failureCount > 0) {
-          const tokensToDelete = [];
-          response.responses.forEach((resp, idx) => {
-              if (!resp.success) tokensToDelete.push(tokens[idx]);
-          });
-          if (tokensToDelete.length > 0) {
-              pool.query(`DELETE FROM fcm_tokens WHERE token = ANY($1::text[])`, [tokensToDelete]);
-          }
-      }
+    res.status(200).json({
+      message: `Notificación enviada con éxito al tema: ${targetTopic}`,
+    });
 
-      res.status(200).json({ message: `Notificaciones enviadas a ${response.successCount} suscriptores.` });
+    // --- FIN DE LA ACTUALIZACIÓN ---
   } catch (error) {
-      console.error("[FCM] Error al enviar notificaciones:", error);
-      res.status(500).json({ error: "Error interno del servidor." });
+    // Manejo de errores mejorado para dar más detalles.
+    console.error(`[FCM] Error al enviar notificación al tema:`, error);
+    if (
+      error.code === "messaging/invalid-argument" &&
+      error.message.includes("topic name")
+    ) {
+      return res
+        .status(400)
+        .json({ error: "El nombre del tema (estado) no es válido." });
+    }
+    if (error.code === "messaging/registration-token-not-registered") {
+      return res
+        .status(404)
+        .json({
+          error: `No hay dispositivos suscritos al tema '${targetTopic}'.`,
+        });
+    }
+    res
+      .status(500)
+      .json({
+        error: "Error interno del servidor al intentar enviar la notificación.",
+      });
   }
 });
-
 // **NUEVO ENDPOINT** para obtener las notificaciones no leídas
 app.get("/api/notifications/unread", authenticateToken, async (req, res) => {
 const userId = req.user.id;
