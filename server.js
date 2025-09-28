@@ -6,31 +6,24 @@ const cors = require("cors");
 const admin = require("firebase-admin");
 const fs = require('fs');
 
-// CÓDIGO CORREGIDO PARA LA PRUEBA
+// En server.js
 try {
-  // 1. Pega aquí el contenido COMPLETO de tu archivo credentials.json
-  const serviceAccount = {
-    type: "service_account",
-    project_id: "chappie2",
-    private_key_id: "4e2a675e3a3d96749556a0e5a2b98e1b5518b7b2",
-    private_key:
-      "-----BEGIN PRIVATE KEY-----\nMIIEvQIBADANBgkqhkiG9w0BAQEFAASCBKcwggSjAgEAAoIBAQDiOe2MfgEk4yad\nu7ongDMS4V5S+j8cZIonx3xs5S0O4LUDvXbZhXHMvb3Z34ojH5ADktsUyaUgCbfa\nKx/3R1dkPd5n1+I6A5dMiLqxrqjSVY7opSWfLtOmnL/3xATqKS5x17FE/OW1EcfN\nqieaqx30N5XgVlqNCBP35G4/8u1mRfhONPTUDZfGrOh1FjMl4cQAMMtpnumyBUF7\nk4snYz5mWJOGaOktmzqAsJ/1bxSW3V3m4fv+aadMn6ghfusygvhjG2gu8DEWV9OP\nAICddoRBDuHdUnOxzPnGdUN7VhSp9yaugBJk1uMB/NRIgW3nZpas1iR4bOkCWR2v\ncnkhuXmXAgMBAAECggEAcOYs9YDKzGBqXKybzevOUV1Up/+IcICCbDDDmUrULkkZ\nPUkYH51XujB1J17GfxnY0te+6wRpGnCPJtt/w/YAGKBBtrxIA+DX6JOR7Gu4h+O4\nAsWsXWFOsicnLJzQQRYVPi5BIyc88hzyBGMnCardM4xsCT2/SgPeh0eid9qh/Hf9\nqFWNNepq1Vg47GDCXa2lIjCJFMelQwaGft//VXZyjDCJGvR0EKh7QB/e6NF8dyUy\nWwbzobuK4wIUNJg6L0p2kI3VlqxRnOyjeRNPTzwKcejdGSM3j2mexMygjq3swfFa\nnogirnrnk0KYdiFZuTksHxi9W7hd6yk5g1yVxGGXdQKBgQDzbpBdLh02i886Cng7\n32FzsNWv5bJuKYDoIsYbh0rpXn05DZ7IgOS7dFDMTbmuOe1eX00NmkbOYItI8A/Z\n4D48vcQbpLuLwRkWVzATrpjN+HFj7zVDYAdZW6rngu9HkoHJoQ3ci+UUraJWLFd9\nZ7fz7QIzsKZ0DuHgN6z9Fjdm9QKBgQDt5/UrRe7/ES2KQAokw3tXTAstkffG4F/8\n1Y1jb1FVZcJN2L4c3KhweilVZ6vXM+PzvXg1RdLvSblvErdxiXX0lan3+Y9VVVJF\nzwOBtMIXp392fIj8t7g/oHJY+FjPfuDUkBh5Th/vYeepfo6XJpsLpbCo61QWuSLt\nnDrOKAcO2wKBgA0avprFiL0O+bDeL2rJs61Or7IwY1Ka2V2lwZRpzBaUB5myqgGR\nLr8Im/DjnkNKywRxjOxWiclCWT0r7y6Da9ZJQO1cCNyVIIybVPM6Su+LmE8Q6YUe\n/kZJMQIVglwP/vyjtuNQhJyAXGTXLj6J/tUaxSuTLuLAilhPpvhY4dKhAoGAAcDa\n4rXCPCkBP+qW6Ix0RUFvN6fCvrl6m59rSldQryNv2ikFxaqupx2PXmzELHLadDpq\nP2JDWrYdYr8tkO2la+cKeKRjNQrK727GJNeTMp9uZg4m6E3mUrm4/gTeirDxsT9a\nntI/lAERtwMSw/Rp4h0Xfzc0yHIW2s9y84ACBU8CgYEA7jYlVLOqZzKrn0C0MJJB\nBFX6w31FSLQ9zv8J/B4OiJl7xXouai50+/nlEDwRfTwoVdkCEaZaeVpcRZc2hD1n\nFtPDEyJdnZvvTfMRRCRRkRGEvMronrc7B6ViVQPWA7z1owTWWQf49THL8uYJDazM\nKW1LEa6WcdMKYvGSjdNIfAg=\n-----END PRIVATE KEY-----\n",
-    client_email: "firebase-adminsdk-fbsvc@chappie2.iam.gserviceaccount.com",
-    client_id: "116960282327611972906",
-    auth_uri: "https://accounts.google.com/o/oauth2/auth",
-    token_uri: "https://oauth2.googleapis.com/token",
-    auth_provider_x509_cert_url: "https://www.googleapis.com/oauth2/v1/certs",
-    client_x509_cert_url:
-      "https://www.googleapis.com/robot/v1/metadata/x509/firebase-adminsdk-fbsvc%40chappie2.iam.gserviceaccount.com",
-    universe_domain: "googleapis.com",
-  };
+  // 1. Leemos la variable codificada en Base64
+  const credentialsBase64 = process.env.GOOGLE_CREDENTIALS_BASE64;
+  if (!credentialsBase64) {
+    throw new Error("La variable de entorno GOOGLE_CREDENTIALS_BASE64 no está configurada.");
+  }
 
-  // 2. Inicializamos Firebase usando el objeto de credenciales directamente
+  // 2. La decodificamos de vuelta al JSON original
+  const credentialsJSON = Buffer.from(credentialsBase64, 'base64').toString('utf8');
+  const serviceAccount = JSON.parse(credentialsJSON);
+
+  // 3. Inicializamos Firebase con el JSON decodificado
   admin.initializeApp({
     credential: admin.credential.cert(serviceAccount),
   });
 
-  console.log("✅ Firebase Admin SDK inicializado correctamente DESDE EL CÓDIGO.");
+  console.log("✅ Firebase Admin SDK inicializado desde Base64.");
 
 } catch (error) {
   console.error("🔥 ¡ERROR CRÍTICO AL INICIALIZAR FIREBASE ADMIN!:", error.message);
