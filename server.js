@@ -6,22 +6,26 @@ const cors = require("cors");
 const admin = require("firebase-admin");
 const fs = require('fs');
 
-// --- INICIALIZACIÓN DE FIREBASE ADMIN (VERSIÓN FINAL Y ROBUSTA) ---
-
-// Definimos la ruta donde Render coloca el archivo de secretos.
-const SERVICE_ACCOUNT_PATH = '/etc/secrets/credentials.json';
-
+// CÓDIGO CORREGIDO Y MÁS ROBUSTO
 try {
-  // Inicializamos la app de Firebase directamente con la ruta del certificado.
-  // Este método es explícito y el más fiable para entornos como Render.
+  // 1. Leemos el JSON completo desde la variable de entorno
+  const credentialsJSON = process.env.GOOGLE_CREDENTIALS_JSON;
+  if (!credentialsJSON) {
+    throw new Error("La variable de entorno GOOGLE_CREDENTIALS_JSON no está configurada.");
+  }
+
+  // 2. Convertimos el string JSON en un objeto JavaScript
+  const serviceAccount = JSON.parse(credentialsJSON);
+
+  // 3. Inicializamos Firebase usando el objeto de credenciales
   admin.initializeApp({
-    credential: admin.credential.cert(SERVICE_ACCOUNT_PATH),
+    credential: admin.credential.cert(serviceAccount),
   });
-  console.log("✅ Firebase Admin SDK inicializado con las credenciales de Render.");
+
+  console.log("✅ Firebase Admin SDK inicializado correctamente desde la variable de entorno.");
+
 } catch (error) {
-  console.error("🔥 ¡ERROR CRÍTICO AL INICIALIZAR FIREBASE ADMIN!:", error);
-  // Si esto falla, la aplicación no puede funcionar.
-  // Salimos del proceso para forzar un reinicio y alertar del problema.
+  console.error("🔥 ¡ERROR CRÍTICO AL INICIALIZAR FIREBASE ADMIN!:", error.message);
   process.exit(1);
 }
 
