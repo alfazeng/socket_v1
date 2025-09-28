@@ -176,6 +176,29 @@ try {
 }
 });
 
+// En server.js, dentro de la sección de ENDPOINTS DE NOTIFICACIONES
+
+app.put("/api/notifications/mark-read/:id", authenticateToken, async (req, res) => {
+  const userId = req.user.id;
+  const notificationId = req.params.id;
+
+  try {
+    const result = await pool.query(
+      "UPDATE notificaciones SET leida = TRUE WHERE id = $1 AND user_id = $2",
+      [notificationId, userId]
+    );
+
+    if (result.rowCount === 0) {
+      return res.status(404).json({ error: "Notificación no encontrada o no tienes permiso para marcarla." });
+    }
+
+    res.status(200).json({ message: "Notificación marcada como leída." });
+  } catch (error) {
+    console.error("Error al marcar la notificación como leída:", error);
+    res.status(500).json({ error: "Error interno del servidor." });
+  }
+});
+
 
 app.post("/api/cerbot/message", authenticateToken, async (req, res) => {
   const { sellerId, message } = req.body;
