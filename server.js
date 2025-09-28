@@ -7,26 +7,18 @@ const admin = require("firebase-admin");
 const fs = require('fs');
 
 // En server.js
+
+// 1. Definimos la ruta donde Render colocará el archivo de secretos.
+const SERVICE_ACCOUNT_PATH = '/etc/secrets/credentials.json';
+
 try {
-  // 1. Leemos la variable codificada en Base64
-  const credentialsBase64 = process.env.GOOGLE_CREDENTIALS_BASE64;
-  if (!credentialsBase64) {
-    throw new Error("La variable de entorno GOOGLE_CREDENTIALS_BASE64 no está configurada.");
-  }
-
-  // 2. La decodificamos de vuelta al JSON original
-  const credentialsJSON = Buffer.from(credentialsBase64, 'base64').toString('utf8');
-  const serviceAccount = JSON.parse(credentialsJSON);
-
-  // 3. Inicializamos Firebase con el JSON decodificado
+  // 2. Inicializamos Firebase directamente desde la ruta del archivo.
   admin.initializeApp({
-    credential: admin.credential.cert(serviceAccount),
+    credential: admin.credential.cert(SERVICE_ACCOUNT_PATH),
   });
-
-  console.log("✅ Firebase Admin SDK inicializado desde Base64.");
-
+  console.log("✅ Firebase Admin SDK inicializado correctamente desde Secret File.");
 } catch (error) {
-  console.error("🔥 ¡ERROR CRÍTICO AL INICIALIZAR FIREBASE ADMIN!:", error.message);
+  console.error("🔥 ¡ERROR CRÍTICO AL INICIALIZAR FIREBASE ADMIN!:", error);
   process.exit(1);
 }
 
