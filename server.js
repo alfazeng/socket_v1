@@ -87,7 +87,7 @@ app.get("/", (req, res) => {
 
 // --- ENDPOINTS DE NOTIFICACIONES ---
 
-a// En: websocket_serverjs_subido_en_render/server.js
+// En: websocket_serverjs_subido_en_render/server.js
 
 app.post("/api/subscribe-fcm", authenticateToken, async (req, res) => {
   const userId = req.user.id;
