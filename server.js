@@ -72,20 +72,20 @@ const authenticateToken = async (req, res, next) => {
 // =================================================================================
 // --- ENDPOINTS DE API REST ---
 // =================================================================================
-// server.js
 
-// Nuevo endpoint para guardar el token de FCM
+app.get("/", (req, res) => {
+  res.send("Servidor de WebSocket y Notificaciones está funcionando.");
+});
+
+// --- ENDPOINTS DE NOTIFICACIONES ---
+
 app.post("/api/subscribe-fcm", authenticateToken, async (req, res) => {
   const userId = req.user.id;
   const { fcmToken } = req.body;
-
   if (!fcmToken) {
     return res.status(400).json({ error: "No se proporcionó fcmToken." });
   }
-
   try {
-    // Inserta o actualiza el token en tu nueva tabla (o la tabla modificada)
-    // Lógica para evitar duplicados: un usuario puede tener tokens para varios dispositivos.
     const query = `
       INSERT INTO fcm_tokens (user_id, token) 
       VALUES ($1, $2) 
@@ -98,16 +98,84 @@ app.post("/api/subscribe-fcm", authenticateToken, async (req, res) => {
     res.status(500).send("Error interno");
   }
 });
+// --- ENDPOINTS DEL CERBOT (EXISTENTES) ---
+// **NUEVO ENDPOINT** para enviar notificaciones desde el panel de administrador
+app.post("/api/notifications/send", authenticateToken, async (req, res) => {
+  try {
+      const userCheck = await pool.query("SELECT rol FROM usuarios WHERE id = $1", [req.user.id]);
+      if (userCheck.rows.length === 0 || userCheck.rows[0].rol !== 'admin') {
+          return res.status(403).json({ error: "Acceso denegado. Se requiere rol de administrador." });
+      }
+  } catch (e) {
+      return res.status(500).json({ error: "Error al verificar el rol del usuario." });
+  }
 
+  const { title, body, url, image, segments } = req.body;
 
+  if (!title || !body || !url) {
+      return res.status(400).json({ error: "Faltan los campos title, body, o url." });
+  }
 
+  try {
+      let query = `SELECT DISTINCT token FROM fcm_tokens ft`;
+      const queryParams = [];
 
-app.get("/", (req, res) => {
-  res.send("WebSocket Subscription Server is running.");
+      if (segments && segments.state) {
+          query += ` JOIN usuarios u ON ft.user_id = u.id WHERE u.estado = $1`;
+          queryParams.push(segments.state);
+      }
+
+      const tokensResult = await pool.query(query, queryParams);
+      const tokens = tokensResult.rows.map(row => row.token);
+
+      if (tokens.length === 0) {
+          return res.status(200).json({ message: "No se encontraron suscriptores para notificar." });
+      }
+
+      const messagePayload = {
+          notification: { title, body, image: image || undefined },
+          webpush: {
+              notification: { icon: "https://chatcerex.com/img/icon-192.png" },
+              fcm_options: { link: url },
+          },
+          tokens: tokens,
+      };
+
+      const response = await admin.messaging().sendMulticast(messagePayload);
+      console.log(`[FCM] Notificaciones enviadas: ${response.successCount} con éxito.`);
+
+      if (response.failureCount > 0) {
+          const tokensToDelete = [];
+          response.responses.forEach((resp, idx) => {
+              if (!resp.success) tokensToDelete.push(tokens[idx]);
+          });
+          if (tokensToDelete.length > 0) {
+              pool.query(`DELETE FROM fcm_tokens WHERE token = ANY($1::text[])`, [tokensToDelete]);
+          }
+      }
+
+      res.status(200).json({ message: `Notificaciones enviadas a ${response.successCount} suscriptores.` });
+  } catch (error) {
+      console.error("[FCM] Error al enviar notificaciones:", error);
+      res.status(500).json({ error: "Error interno del servidor." });
+  }
 });
 
-// --- ENDPOINTS DEL CERBOT (EXISTENTES) ---
-// En tu server.js, reemplaza el endpoint /api/cerbot/message completo
+// **NUEVO ENDPOINT** para obtener las notificaciones no leídas
+app.get("/api/notifications/unread", authenticateToken, async (req, res) => {
+const userId = req.user.id;
+try {
+  const unreadNotifications = await pool.query(
+    "SELECT id, titulo, cuerpo, url, imagen, leida, fecha_creacion FROM notificaciones WHERE user_id = $1 AND leida = FALSE ORDER BY fecha_creacion DESC",
+    [userId]
+  );
+  res.json(unreadNotifications.rows);
+} catch (error) {
+  console.error("Error al obtener notificaciones no leídas:", error);
+  res.status(500).json({ error: "Error interno del servidor." });
+}
+});
+
 
 app.post("/api/cerbot/message", authenticateToken, async (req, res) => {
   const { sellerId, message } = req.body;
@@ -435,22 +503,14 @@ app.post("/api/promociones/enviar", authenticateToken, async (req, res) => {
 });
 
 // =================================================================================
-// --- INICIO DEL SERVIDOR HTTP Y WEBSOCKET ---
+// --- SERVIDOR WEBSOCKET ---
 // =================================================================================
 const server = http.createServer(app);
 const wss = new WebSocket.Server({ server });
 
-server.listen(PORT, () => {
-  console.log(`🚀 Servidor WebSocket iniciado en el puerto: ${PORT}`);
-});
-
-// =================================================================================
-// --- LÓGICA WEBSOCKET PARA NOTIFICACIONES ---
-// =================================================================================
 wss.on("connection", (ws) => {
   ws.isAlive = true;
   ws.on("pong", () => (ws.isAlive = true));
-
   console.log("🔌 Nuevo cliente conectado.");
 
   ws.on("message", async (msgRaw) => {
@@ -458,79 +518,23 @@ wss.on("connection", (ws) => {
     try {
       msg = JSON.parse(msgRaw);
     } catch (err) {
-      ws.send(
-        JSON.stringify({ type: "error", msg: "Formato de mensaje inválido." })
-      );
+      ws.send(JSON.stringify({ type: "error", msg: "Formato de mensaje inválido." }));
       return;
     }
 
-    switch (msg.type) {
-      case "identificacion":
-        if (msg.userId) {
-          ws.userId = msg.userId;
-          console.log(
-            `✅ Usuario ${ws.userId} (${msg.fullName}) identificado.`
-          );
-          ws.send(
-            JSON.stringify({ type: "identificado", msg: "Conexión lista." })
-          );
-        }
-        break;
-
-      case "registrar_push":
-        if (msg.userId && msg.subscription && ws.userId === msg.userId) {
-          console.log(`📲 Registrando suscripción push para ${ws.userId}`);
-          const client = await pool.connect();
-          try {
-            const { endpoint, keys } = msg.subscription;
-            const { p256dh, auth } = keys;
-            const updateResult = await client.query(
-              "UPDATE push_subscriptions SET endpoint = $1, p256dh = $2, auth = $3 WHERE user_id = $4 RETURNING user_id",
-              [endpoint, p256dh, auth, ws.userId]
-            );
-            if (updateResult.rows.length === 0) {
-              await client.query(
-                "INSERT INTO push_subscriptions (user_id, endpoint, p256dh, auth) VALUES ($1, $2, $3, $4)",
-                [ws.userId, endpoint, p256dh, auth]
-              );
-            }
-            console.log(`👍 Suscripción para ${ws.userId} guardada.`);
-            ws.send(
-              JSON.stringify({ type: "suscripcion_registrada", status: "ok" })
-            );
-          } catch (dbErr) {
-            console.error(
-              `❌ Error de DB al guardar suscripción para ${ws.userId}:`,
-              dbErr
-            );
-            ws.send(
-              JSON.stringify({
-                type: "error",
-                msg: "No se pudo guardar la suscripción.",
-              })
-            );
-          } finally {
-            client.release();
-          }
-        }
-        break;
-
-      default:
-        ws.send(
-          JSON.stringify({
-            type: "error",
-            msg: "Tipo de mensaje no reconocido.",
-          })
-        );
-        break;
+    // La única responsabilidad del WebSocket ahora es la identificación
+    if (msg.type === "identificacion" && msg.userId) {
+        ws.userId = msg.userId;
+        console.log(`✅ Usuario ${ws.userId} (${msg.fullName}) identificado.`);
+        ws.send(JSON.stringify({ type: "identificado", msg: "Conexión lista." }));
+    } else {
+        ws.send(JSON.stringify({ type: "error", msg: "Tipo de mensaje no reconocido." }));
     }
   });
 
   ws.on("close", () => {
     if (ws.userId) {
       console.log(`🔌 Usuario ${ws.userId} desconectado.`);
-    } else {
-      console.log("🔌 Conexión anónima cerrada.");
     }
   });
 
@@ -543,11 +547,15 @@ wss.on("connection", (ws) => {
 setInterval(() => {
   wss.clients.forEach((ws) => {
     if (!ws.isAlive) {
-      if (ws.userId)
-        console.log(`🔪 Terminando conexión inactiva del usuario ${ws.userId}`);
+      if (ws.userId) console.log(`🔪 Terminando conexión inactiva del usuario ${ws.userId}`);
       return ws.terminate();
     }
     ws.isAlive = false;
     ws.ping(() => {});
   });
 }, 30000);
+
+// --- ARRANQUE DEL SERVIDOR ---
+server.listen(PORT, () => {
+  console.log(`🚀 Servidor WebSocket y API escuchando en el puerto: ${PORT}`);
+});
