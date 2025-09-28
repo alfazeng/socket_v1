@@ -8,17 +8,24 @@ const fs = require('fs');
 
 // En server.js
 
-// 1. Definimos la ruta donde Render colocará el archivo de secretos.
+// CÓDIGO CORREGIDO Y DEFINITIVO
 const SERVICE_ACCOUNT_PATH = '/etc/secrets/credentials.json';
 
 try {
-  // 2. Inicializamos Firebase directamente desde la ruta del archivo.
+  // Verificamos que el archivo exista antes de intentar usarlo
+  if (!fs.existsSync(SERVICE_ACCOUNT_PATH)) {
+    throw new Error(`El archivo de credenciales no se encontró en la ruta: ${SERVICE_ACCOUNT_PATH}. Asegúrate de que el Secret File esté montado en Render.`);
+  }
+
   admin.initializeApp({
     credential: admin.credential.cert(SERVICE_ACCOUNT_PATH),
+    projectId: 'chappie2', // <-- ESTA ES LA LÍNEA CRUCIAL QUE FUERZA EL PROYECTO
   });
-  console.log("✅ Firebase Admin SDK inicializado correctamente desde Secret File.");
+  
+  console.log("✅ Firebase Admin SDK inicializado explícitamente con ProjectID 'chappie2'.");
+
 } catch (error) {
-  console.error("🔥 ¡ERROR CRÍTICO AL INICIALIZAR FIREBASE ADMIN!:", error);
+  console.error("🔥 ¡ERROR CRÍTICO AL INICIALIZAR FIREBASE ADMIN!:", error.message);
   process.exit(1);
 }
 
