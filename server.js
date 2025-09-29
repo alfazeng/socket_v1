@@ -169,15 +169,12 @@ app.post("/api/notifications/send", authenticateToken, async (req, res) => {
   }
 
   try {
-    // --- INICIO DE LA LÓGICA CORREGIDA ---
-
     let tokens;
     let query;
     const queryParams = [];
 
-    // 2. Construir la consulta a la base de datos según la segmentación.
+    // 2. Construir la consulta a la base de datos según la segmentación (sin cambios)
     if (segments && segments.state) {
-      // Si se especifica un estado, obtenemos los tokens de los usuarios de ese estado.
       console.log(`[FCM] Obteniendo tokens para el estado: ${segments.state}`);
       query = `
         SELECT ft.token
@@ -187,22 +184,30 @@ app.post("/api/notifications/send", authenticateToken, async (req, res) => {
       `;
       queryParams.push(segments.state);
     } else {
-      // Si no hay segmentación, obtenemos TODOS los tokens.
       console.log(`[FCM] Obteniendo todos los tokens de los usuarios.`);
       query = "SELECT token FROM fcm_tokens";
     }
 
     const tokensResult = await pool.query(query, queryParams);
-    tokens = tokensResult.rows.map(row => row.token);
+    tokens = tokensResult.rows.map((row) => row.token);
 
     if (tokens.length === 0) {
-      console.log("[FCM] No se encontraron tokens para los criterios de segmentación. No se enviará ninguna notificación.");
-      return res.status(404).json({ message: "No hay dispositivos registrados que coincidan con la segmentación." });
+      console.log(
+        "[FCM] No se encontraron tokens para los criterios de segmentación."
+      );
+      return res
+        .status(404)
+        .json({
+          message:
+            "No hay dispositivos registrados que coincidan con la segmentación.",
+        });
     }
-    
-    console.log(`[FCM] Se enviará la notificación a ${tokens.length} dispositivo(s).`);
 
-    // 3. Construir el payload del mensaje para enviar directamente a los tokens.
+    console.log(
+      `[FCM] Se enviará la notificación a ${tokens.length} dispositivo(s).`
+    );
+
+    // 3. Construir el payload del mensaje (sin cambios)
     const messagePayload = {
       notification: {
         title,
@@ -217,46 +222,58 @@ app.post("/api/notifications/send", authenticateToken, async (req, res) => {
           link: url,
         },
       },
-      tokens: tokens, // ¡La clave es usar 'tokens' (plural) con un array!
+      tokens: tokens,
     };
 
-    // 4. Usar el método .sendMulticast() para enviar el mensaje a todos los tokens.
-    const response = await admin.messaging().sendMulticast(messagePayload);
-    
-    console.log(`[FCM] Notificaciones enviadas: ${response.successCount} con éxito, ${response.failureCount} fallaron.`);
+    // =======================================================================
+    // --- LA CORRECCIÓN FINAL ESTÁ AQUÍ ---
+    // Se reemplaza .sendMulticast() con el método moderno .sendEachForMulticast()
+    // =======================================================================
+    console.log("[FCM] Usando el método moderno 'sendEachForMulticast'.");
+    const response = await admin
+      .messaging()
+      .sendEachForMulticast(messagePayload);
+    // =======================================================================
 
-    // Opcional: Lógica para limpiar tokens inválidos (buena práctica)
+    console.log(
+      `[FCM] Notificaciones enviadas: ${response.successCount} con éxito, ${response.failureCount} fallaron.`
+    );
+
+    // Lógica para limpiar tokens inválidos (sin cambios, ahora funciona con la nueva respuesta)
     if (response.failureCount > 0) {
-        const tokensToDelete = [];
-        response.responses.forEach((resp, idx) => {
-            if (!resp.success) {
-                const errorCode = resp.error.code;
-                if (errorCode === 'messaging/registration-token-not-registered' ||
-                    errorCode === 'messaging/invalid-registration-token') {
-                    tokensToDelete.push(tokens[idx]);
-                }
-            }
-        });
-        if(tokensToDelete.length > 0) {
-            console.log(`[FCM Cleanup] Eliminando ${tokensToDelete.length} tokens inválidos de la base de datos.`);
-            await pool.query('DELETE FROM fcm_tokens WHERE token = ANY($1::text[])', [tokensToDelete]);
+      const tokensToDelete = [];
+      response.responses.forEach((resp, idx) => {
+        if (!resp.success) {
+          const errorCode = resp.error.code;
+          if (
+            errorCode === "messaging/registration-token-not-registered" ||
+            errorCode === "messaging/invalid-registration-token"
+          ) {
+            tokensToDelete.push(tokens[idx]);
+          }
         }
+      });
+      if (tokensToDelete.length > 0) {
+        console.log(
+          `[FCM Cleanup] Eliminando ${tokensToDelete.length} tokens inválidos de la base de datos.`
+        );
+        await pool.query(
+          "DELETE FROM fcm_tokens WHERE token = ANY($1::text[])",
+          [tokensToDelete]
+        );
+      }
     }
 
     res.status(200).json({
       message: `Notificación enviada.`,
       successCount: response.successCount,
-      failureCount: response.failureCount
+      failureCount: response.failureCount,
     });
-
-    // --- FIN DE LA LÓGICA CORREGIDA ---
   } catch (error) {
     console.error(`[FCM] Error fatal al enviar notificación:`, error);
-    res
-      .status(500)
-      .json({
-        error: "Error interno del servidor al intentar enviar la notificación.",
-      });
+    res.status(500).json({
+      error: "Error interno del servidor al intentar enviar la notificación.",
+    });
   }
 });
 // **NUEVO ENDPOINT** para obtener las notificaciones no leídas
