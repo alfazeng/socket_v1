@@ -141,7 +141,9 @@ app.post("/api/subscribe-fcm", authenticateToken, async (req, res) => {
 
 // --- ENDPOINTS DEL CERBOT (EXISTENTES) ---
 // **NUEVO ENDPOINT** para enviar notificaciones desde el panel de administrador
+// REEMPLAZA tu endpoint existente con este:
 app.post("/api/notifications/send", authenticateToken, async (req, res) => {
+  // 1. Verificación de permisos de Administrador (sin cambios)
   try {
     const userCheck = await pool.query(
       "SELECT rol FROM usuarios WHERE id = $1",
@@ -167,28 +169,45 @@ app.post("/api/notifications/send", authenticateToken, async (req, res) => {
   }
 
   try {
-    // --- INICIO DE LA ACTUALIZACIÓN ---
+    // --- INICIO DE LA LÓGICA CORREGIDA ---
 
-    // 1. Determinar el tema de destino basado en la segmentación.
-    let targetTopic;
+    let tokens;
+    let query;
+    const queryParams = [];
+
+    // 2. Construir la consulta a la base de datos según la segmentación.
     if (segments && segments.state) {
-      // Si se especifica un estado, se crea un nombre de tema seguro para ese estado.
-      // Ejemplo: "Nueva Esparta" se convierte en "state_Nueva_Esparta"
-      const safeStateName = segments.state.replace(/[^a-zA-Z0-9-_.~%]/g, "_");
-      targetTopic = `state_${safeStateName}`;
+      // Si se especifica un estado, obtenemos los tokens de los usuarios de ese estado.
+      console.log(`[FCM] Obteniendo tokens para el estado: ${segments.state}`);
+      query = `
+        SELECT ft.token
+        FROM fcm_tokens ft
+        JOIN usuarios u ON ft.user_id = u.id
+        WHERE u.estado = $1
+      `;
+      queryParams.push(segments.state);
     } else {
-      // Si no hay segmentación, el destino es el tema general para todos los usuarios.
-      targetTopic = "all_users";
+      // Si no hay segmentación, obtenemos TODOS los tokens.
+      console.log(`[FCM] Obteniendo todos los tokens de los usuarios.`);
+      query = "SELECT token FROM fcm_tokens";
     }
 
-    console.log(`[FCM] Intentando enviar notificación al tema: ${targetTopic}`);
+    const tokensResult = await pool.query(query, queryParams);
+    tokens = tokensResult.rows.map(row => row.token);
 
-    // 2. Construir el payload del mensaje para enviar a un tema.
+    if (tokens.length === 0) {
+      console.log("[FCM] No se encontraron tokens para los criterios de segmentación. No se enviará ninguna notificación.");
+      return res.status(404).json({ message: "No hay dispositivos registrados que coincidan con la segmentación." });
+    }
+    
+    console.log(`[FCM] Se enviará la notificación a ${tokens.length} dispositivo(s).`);
+
+    // 3. Construir el payload del mensaje para enviar directamente a los tokens.
     const messagePayload = {
       notification: {
         title,
         body,
-        image: image || undefined, // Incluye la imagen solo si se proporciona
+        image: image || undefined,
       },
       webpush: {
         notification: {
@@ -198,39 +217,41 @@ app.post("/api/notifications/send", authenticateToken, async (req, res) => {
           link: url,
         },
       },
-      topic: targetTopic, // ¡La clave es usar 'topic' en lugar de 'tokens'!
+      tokens: tokens, // ¡La clave es usar 'tokens' (plural) con un array!
     };
 
-    // 3. Usar el método .send() para enviar el mensaje al tema.
-    const response = await admin.messaging().send(messagePayload);
+    // 4. Usar el método .sendMulticast() para enviar el mensaje a todos los tokens.
+    const response = await admin.messaging().sendMulticast(messagePayload);
+    
+    console.log(`[FCM] Notificaciones enviadas: ${response.successCount} con éxito, ${response.failureCount} fallaron.`);
 
-    console.log(
-      `[FCM] Mensaje enviado con éxito al tema '${targetTopic}'. ID del mensaje: ${response}`
-    );
+    // Opcional: Lógica para limpiar tokens inválidos (buena práctica)
+    if (response.failureCount > 0) {
+        const tokensToDelete = [];
+        response.responses.forEach((resp, idx) => {
+            if (!resp.success) {
+                const errorCode = resp.error.code;
+                if (errorCode === 'messaging/registration-token-not-registered' ||
+                    errorCode === 'messaging/invalid-registration-token') {
+                    tokensToDelete.push(tokens[idx]);
+                }
+            }
+        });
+        if(tokensToDelete.length > 0) {
+            console.log(`[FCM Cleanup] Eliminando ${tokensToDelete.length} tokens inválidos de la base de datos.`);
+            await pool.query('DELETE FROM fcm_tokens WHERE token = ANY($1::text[])', [tokensToDelete]);
+        }
+    }
 
     res.status(200).json({
-      message: `Notificación enviada con éxito al tema: ${targetTopic}`,
+      message: `Notificación enviada.`,
+      successCount: response.successCount,
+      failureCount: response.failureCount
     });
 
-    // --- FIN DE LA ACTUALIZACIÓN ---
+    // --- FIN DE LA LÓGICA CORREGIDA ---
   } catch (error) {
-    // Manejo de errores mejorado para dar más detalles.
-    console.error(`[FCM] Error al enviar notificación al tema:`, error);
-    if (
-      error.code === "messaging/invalid-argument" &&
-      error.message.includes("topic name")
-    ) {
-      return res
-        .status(400)
-        .json({ error: "El nombre del tema (estado) no es válido." });
-    }
-    if (error.code === "messaging/registration-token-not-registered") {
-      return res
-        .status(404)
-        .json({
-          error: `No hay dispositivos suscritos al tema '${targetTopic}'.`,
-        });
-    }
+    console.error(`[FCM] Error fatal al enviar notificación:`, error);
     res
       .status(500)
       .json({
