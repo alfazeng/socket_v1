@@ -89,6 +89,9 @@ app.get("/", (req, res) => {
 
 // En: websocket_serverjs_subido_en_render/server.js
 
+// En: server.js
+// REEMPLAZO PARA EL ENDPOINT /api/subscribe-fcm
+
 app.post("/api/subscribe-fcm", authenticateToken, async (req, res) => {
   const userId = req.user.id;
   const { fcmToken } = req.body;
@@ -96,47 +99,42 @@ app.post("/api/subscribe-fcm", authenticateToken, async (req, res) => {
     return res.status(400).json({ error: "No se proporcionó fcmToken." });
   }
 
-  // --- INICIO DE LA LÓGICA DE AUTOCURACIÓN ---
-  const client = await pool.connect();
   try {
-    // 1. Iniciamos una transacción para asegurar la integridad de los datos.
-    await client.query('BEGIN');
-
-    // 2. Buscamos el estado actual del usuario para la suscripción al tema.
-    const userResult = await client.query('SELECT estado FROM usuarios WHERE id = $1', [userId]);
-    const userState = userResult.rows[0]?.estado;
-
-    // 3. Eliminamos CUALQUIER token antiguo asociado a este usuario.
-    // Esto limpia duplicados y maneja el caso de que el usuario cambie de dispositivo.
-    const deleteResult = await client.query('DELETE FROM fcm_tokens WHERE user_id = $1', [userId]);
-    if (deleteResult.rowCount > 0) {
-      console.log(`[FCM Cleanup] Se eliminaron ${deleteResult.rowCount} tokens antiguos para el usuario ${userId}.`);
-    }
-
-    // 4. Insertamos el nuevo y único token.
-    await client.query('INSERT INTO fcm_tokens (user_id, token) VALUES ($1, $2)', [userId, fcmToken]);
-    console.log(`[FCM] Token nuevo guardado para el usuario ${userId}.`);
+    // 1. La consulta UPSERT atómica.
+    // Intenta insertar el nuevo token. Si el token YA EXISTE (conflicto en la columna 'token'),
+    // en lugar de fallar, ejecuta una acción de UPDATE: actualiza el user_id
+    // para que coincida con el usuario que está realizando la solicitud.
+    // Esto maneja todos los casos:
+    //   - Token nuevo para un usuario -> INSERT funciona.
+    //   - Mismo usuario re-suscribe el mismo token -> UPDATE no cambia nada, éxito.
+    //   - Un token se reasigna a un nuevo usuario -> UPDATE lo corrige.
+    const upsertQuery = `
+      INSERT INTO fcm_tokens (user_id, token) 
+      VALUES ($1, $2)
+      ON CONFLICT (token) 
+      DO UPDATE SET user_id = EXCLUDED.user_id;
+    `;
     
-    // 5. Finalizamos la transacción.
-    await client.query('COMMIT');
+    await pool.query(upsertQuery, [userId, fcmToken]);
+    console.log(`[FCM UPSERT] Token ${fcmToken} asegurado para el usuario ${userId}.`);
 
-    // 6. Suscribimos el nuevo token a los temas correspondientes.
+    // 2. La lógica de suscripción a temas se mantiene, ya que es idempotente.
+    // Firebase maneja las suscripciones duplicadas sin error.
+    const userResult = await pool.query('SELECT estado FROM usuarios WHERE id = $1', [userId]);
+    const userState = userResult.rows[0]?.estado;
+    
     await admin.messaging().subscribeToTopic(fcmToken, 'all_users');
     if (userState) {
-        const topicName = `state_${userState.replace(/[^a-zA-Z0-9-_.~%]/g, '_')}`;
-        await admin.messaging().subscribeToTopic(fcmToken, topicName);
+      const topicName = `state_${userState.replace(/[^a-zA-Z0-9-_.~%]/g, '_')}`;
+      await admin.messaging().subscribeToTopic(fcmToken, topicName);
     }
 
-    res.status(200).json({ message: "Suscripción FCM actualizada y tokens antiguos eliminados." });
+    res.status(200).json({ message: "Suscripción FCM procesada correctamente." });
 
   } catch (error) {
-    await client.query('ROLLBACK'); // Si algo falla, revertimos todos los cambios.
-    console.error("Error en el proceso de suscripción y limpieza de FCM:", error);
+    console.error("Error en el proceso de suscripción a FCM:", error);
     res.status(500).send("Error interno del servidor");
-  } finally {
-    client.release(); // Liberamos la conexión a la base de datos.
   }
-  // --- FIN DE LA LÓGICA DE AUTOCURACIÓN ---
 });
 
 // --- ENDPOINTS DEL CERBOT (EXISTENTES) ---
