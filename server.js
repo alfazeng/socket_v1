@@ -620,6 +620,34 @@ app.post("/api/promociones/enviar", authenticateToken, async (req, res) => {
   }
 });
 
+
+// En tu server.js (Render)
+
+app.delete("/api/notifications/:id", authenticateToken, async (req, res) => {
+  const userId = req.user.id;
+  const { id: notificationId } = req.params;
+
+  try {
+    const deleteResult = await pool.query(
+      // CRÍTICO: La cláusula WHERE asegura que un usuario solo pueda borrar SUS PROPIAS notificaciones.
+      "DELETE FROM notificaciones WHERE id = $1 AND user_id = $2",
+      [notificationId, userId]
+    );
+
+    if (deleteResult.rowCount === 0) {
+      // Esto ocurre si la notificación no existe o no le pertenece al usuario.
+      return res.status(404).json({ error: "Notificación no encontrada o sin permisos para eliminarla." });
+    }
+
+    // 204 No Content es la respuesta estándar para una eliminación exitosa.
+    res.sendStatus(204); 
+
+  } catch (error) {
+    console.error("Error al eliminar la notificación:", error);
+    res.status(500).json({ error: "Error interno del servidor." });
+  }
+});
+
 // =================================================================================
 // --- SERVIDOR WEBSOCKET ---
 // =================================================================================
