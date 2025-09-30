@@ -92,34 +92,51 @@ app.get("/", (req, res) => {
 // En: server.js
 // REEMPLAZO PARA EL ENDPOINT /api/subscribe-fcm
 
+// En: server.js
+// REEMPLAZO PARA EL ENDPOINT /api/subscribe-fcm (CON LOGGING DE DIAGNÓSTICO)
+
 app.post("/api/subscribe-fcm", authenticateToken, async (req, res) => {
+  // --- INICIO DEL LOGGING DE DIAGNÓSTICO ---
+  console.log("==========================================================");
+  console.log(`[DIAGNÓSTICO] Petición a /api/subscribe-fcm recibida.`);
+  
   const userId = req.user.id;
   const { fcmToken } = req.body;
-  if (!fcmToken) {
-    return res.status(400).json({ error: "No se proporcionó fcmToken." });
+
+  console.log(`[DIAGNÓSTICO] User ID extraído del token JWT: ${userId}`);
+  console.log(`[DIAGNÓSTICO] fcmToken recibido en el body de la petición: "${fcmToken}"`); // Comillas para ver si está vacío o tiene espacios.
+
+  if (!fcmToken || typeof fcmToken !== 'string' || fcmToken.trim() === '') {
+    console.warn("[DIAGNÓSTICO] El fcmToken es inválido, nulo, o vacío. Abortando operación.");
+    console.log("==========================================================");
+    // Devolvemos 200 para que el cliente no lo vea como un error y no reintente infinitamente,
+    // pero dejamos claro en el log que no se hizo nada.
+    return res.status(200).json({ message: "Operación ignorada: fcmToken inválido." });
   }
+  // --- FIN DEL LOGGING DE DIAGNÓSTICO ---
 
   try {
-    // 1. La consulta UPSERT atómica.
-    // Intenta insertar el nuevo token. Si el token YA EXISTE (conflicto en la columna 'token'),
-    // en lugar de fallar, ejecuta una acción de UPDATE: actualiza el user_id
-    // para que coincida con el usuario que está realizando la solicitud.
-    // Esto maneja todos los casos:
-    //   - Token nuevo para un usuario -> INSERT funciona.
-    //   - Mismo usuario re-suscribe el mismo token -> UPDATE no cambia nada, éxito.
-    //   - Un token se reasigna a un nuevo usuario -> UPDATE lo corrige.
     const upsertQuery = `
       INSERT INTO fcm_tokens (user_id, token) 
       VALUES ($1, $2)
       ON CONFLICT (token) 
-      DO UPDATE SET user_id = EXCLUDED.user_id;
+      DO UPDATE SET user_id = EXCLUDED.user_id
+      RETURNING *; // <--- AÑADIDO CLAVE: Devolver la fila insertada/actualizada.
     `;
     
-    await pool.query(upsertQuery, [userId, fcmToken]);
-    console.log(`[FCM UPSERT] Token ${fcmToken} asegurado para el usuario ${userId}.`);
+    console.log("[DIAGNÓSTICO] Ejecutando consulta UPSERT en la base de datos...");
+    const { rows } = await pool.query(upsertQuery, [userId, fcmToken]);
+    
+    // --- MÁS LOGGING DE DIAGNÓSTICO ---
+    if (rows.length > 0) {
+      console.log(`[DIAGNÓSTICO] ¡Éxito en la DB! Fila afectada (ID: ${rows[0].id}, UserID: ${rows[0].user_id})`);
+    } else {
+      console.error("[DIAGNÓSTICO] ¡ALERTA! La consulta UPSERT se ejecutó pero no devolvió ninguna fila. Esto es inesperado.");
+    }
+    console.log("==========================================================");
+    // --- FIN DEL LOGGING DE DIAGNÓSTICO ---
 
-    // 2. La lógica de suscripción a temas se mantiene, ya que es idempotente.
-    // Firebase maneja las suscripciones duplicadas sin error.
+    // La lógica de suscripción a temas se mantiene igual
     const userResult = await pool.query('SELECT estado FROM usuarios WHERE id = $1', [userId]);
     const userState = userResult.rows[0]?.estado;
     
@@ -132,7 +149,8 @@ app.post("/api/subscribe-fcm", authenticateToken, async (req, res) => {
     res.status(200).json({ message: "Suscripción FCM procesada correctamente." });
 
   } catch (error) {
-    console.error("Error en el proceso de suscripción a FCM:", error);
+    console.error("[DIAGNÓSTICO] ERROR CATASTRÓFICO en el bloque try/catch:", error);
+    console.log("==========================================================");
     res.status(500).send("Error interno del servidor");
   }
 });
