@@ -9,6 +9,8 @@ const fs = require('fs');
 // En server.js
 
 // En server.js
+// En server.js
+
 try {
   // 1. Leemos la variable codificada en Base64
   const credentialsBase64 = process.env.GOOGLE_CREDENTIALS_BASE64;
@@ -20,13 +22,20 @@ try {
   const credentialsJSON = Buffer.from(credentialsBase64, 'base64').toString('utf8');
   const serviceAccount = JSON.parse(credentialsJSON);
 
-  // 3. Inicializamos Firebase con el JSON decodificado
+  // --- INICIO DE LA SOLUCIÓN ---
+  // 3. Validamos que el serviceAccount contenga el projectId correcto
+  if (serviceAccount.project_id !== 'chappie4-d50ad') {
+    console.warn(`[ADVERTENCIA] El projectId en las credenciales ('${serviceAccount.project_id}') no coincide con el del frontend ('chappie4-d50ad'). Esto puede causar errores de autenticación.`);
+  }
+
+  // 4. Inicializamos Firebase con el serviceAccount. No es necesario especificar el projectId aquí,
+  //    ya que el SDK lo tomará directamente del archivo de credenciales.
   admin.initializeApp({
     credential: admin.credential.cert(serviceAccount),
-    projectId: 'chappie2',
   });
+  // --- FIN DE LA SOLUCIÓN ---
 
-  console.log("✅ Firebase Admin SDK inicializado correctamente desde Base64.");
+  console.log(`✅ Firebase Admin SDK inicializado correctamente para el proyecto: ${serviceAccount.project_id}`);
 
 } catch (error) {
   console.error("🔥 ¡ERROR CRÍTICO AL INICIALIZAR FIREBASE ADMIN!:", error.message);
