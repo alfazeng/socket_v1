@@ -527,46 +527,80 @@ app.post("/api/promociones/enviar", authenticateToken, async (req, res) => {
   const client = await pool.connect();
   try {
     // 1. Verificar permisos (sin cambios)
-    const publicationCheck = await client.query("SELECT usuario_id FROM publicaciones WHERE id = $1", [publicationId]);
-    if (publicationCheck.rows.length === 0 || publicationCheck.rows[0].usuario_id !== sender.id) {
-      return res.status(403).json({ error: "No tienes permiso para esta acción." });
+    const publicationCheck = await client.query(
+      "SELECT usuario_id FROM publicaciones WHERE id = $1",
+      [publicationId]
+    );
+    if (
+      publicationCheck.rows.length === 0 ||
+      publicationCheck.rows[0].usuario_id !== sender.id
+    ) {
+      return res
+        .status(403)
+        .json({ error: "No tienes permiso para esta acción." });
     }
 
     // --- INICIO DE LA SOLUCIÓN ARQUITECTÓNICA ---
-    await client.query('BEGIN');
+    await client.query("BEGIN");
 
     // 2. (NUEVO) Guardar la notificación en el historial para TODOS los destinatarios.
-    console.log(`[DB] Guardando historial de promoción para ${recipientIds.length} usuario(s).`);
+    console.log(
+      `[DB] Guardando historial de promoción para ${recipientIds.length} usuario(s).`
+    );
     const notificationTitle = `📢 Nueva promoción de ${sender.nombre}`;
     const notificationUrl = `/publicacion/${publicationId}`;
     const insertQuery = `INSERT INTO notificaciones (user_id, titulo, cuerpo, url) VALUES ($1, $2, $3, $4)`;
-    
+
     for (const userId of recipientIds) {
-      await client.query(insertQuery, [userId, notificationTitle, message, notificationUrl]);
+      await client.query(insertQuery, [
+        userId,
+        notificationTitle,
+        message,
+        notificationUrl,
+      ]);
     }
-    
+
+    // 3. Proceder con la entrega diferenciada (Online vs. Offline)
     // 3. Proceder con la entrega diferenciada (Online vs. Offline)
     const onlineUserIds = [];
     wss.clients.forEach((wsClient) => {
-      if (wsClient.readyState === WebSocket.OPEN && recipientIds.includes(wsClient.userId)) {
-        wsClient.send(JSON.stringify({
-          type: "promotional_message",
-          payload: { from: sender.nombre, message, publicationId, timestamp: new Date().toISOString() },
-        }));
-        onlineUserIds.push(wsClient.userId);
+      // --- INICIO DE LA SOLUCIÓN ---
+      // Convertimos el wsClient.userId (string) a un número antes de la comparación.
+      const clientUserId = parseInt(wsClient.userId, 10);
+      if (
+        wsClient.readyState === WebSocket.OPEN &&
+        recipientIds.includes(clientUserId)
+      ) {
+        // --- FIN DE LA SOLUCIÓN ---
+        wsClient.send(
+          JSON.stringify({
+            type: "promotional_message",
+            payload: {
+              from: sender.nombre,
+              message,
+              publicationId,
+              timestamp: new Date().toISOString(),
+            },
+          })
+        );
+        onlineUserIds.push(clientUserId);
       }
     });
 
-    const offlineUserIds = recipientIds.filter(id => !onlineUserIds.includes(id));
-    
+    const offlineUserIds = recipientIds.filter(
+      (id) => !onlineUserIds.includes(id)
+    );
+
     if (offlineUserIds.length > 0) {
-      console.log(`[FCM] Enviando notificaciones push a ${offlineUserIds.length} usuarios offline.`);
-      
+      console.log(
+        `[FCM] Enviando notificaciones push a ${offlineUserIds.length} usuarios offline.`
+      );
+
       const tokensResult = await client.query(
         `SELECT token FROM fcm_tokens WHERE user_id = ANY($1::int[])`,
         [offlineUserIds]
       );
-      const tokens = tokensResult.rows.map(row => row.token);
+      const tokens = tokensResult.rows.map((row) => row.token);
 
       if (tokens.length > 0) {
         const messagePayload = {
@@ -574,31 +608,36 @@ app.post("/api/promociones/enviar", authenticateToken, async (req, res) => {
             title: notificationTitle,
             body: message,
             url: `https://chatcerex.com${notificationUrl}`,
-            icon: "https://chatcerex.com/img/icon-192.png"
+            icon: "https://chatcerex.com/img/icon-192.png",
           },
           tokens: tokens,
         };
 
         // No necesitamos esperar la respuesta, el envío es asíncrono
-        admin.messaging().sendEachForMulticast(messagePayload)
-          .then(response => {
-            console.log(`[FCM] Promociones enviadas: ${response.successCount} con éxito.`);
+        admin
+          .messaging()
+          .sendEachForMulticast(messagePayload)
+          .then((response) => {
+            console.log(
+              `[FCM] Promociones enviadas: ${response.successCount} con éxito.`
+            );
             // Aquí puedes añadir la lógica de limpieza de tokens si lo deseas
           })
-          .catch(err => console.error("[FCM] Error al enviar promociones:", err));
+          .catch((err) =>
+            console.error("[FCM] Error al enviar promociones:", err)
+          );
       }
     }
 
-    await client.query('COMMIT');
+    await client.query("COMMIT");
     // --- FIN DE LA SOLUCIÓN ARQUITECTÓNICA ---
 
     res.status(200).json({
       message: "Promoción enviada y registrada con éxito.",
       totalRecipients: recipientIds.length,
       onlineDeliveries: onlineUserIds.length,
-      offlinePushNotifications: offlineUserIds.length
+      offlinePushNotifications: offlineUserIds.length,
     });
-
   } catch (error) {
     await client.query('ROLLBACK');
     console.error("Error fatal al enviar la promoción:", error);
