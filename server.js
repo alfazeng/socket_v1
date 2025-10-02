@@ -59,26 +59,36 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 
-// --- MIDDLEWARE DE AUTENTICACIÓN (ACTUALIZADO) ---
+// --- MIDDLEWARE DE AUTENTICACIÓN MEJORADO ---
 const authenticateToken = async (req, res, next) => {
   const authHeader = req.headers.authorization;
   const token = authHeader && authHeader.split(" ")[1];
   if (token == null) return res.sendStatus(401);
   try {
     const decodedToken = await admin.auth().verifyIdToken(token);
-    // Se modifica la consulta para obtener también el nombre del usuario
     const userResult = await pool.query(
       "SELECT id, nombre FROM usuarios WHERE correo = $1",
       [decodedToken.email]
     );
+    
+    // --- SOLUCIÓN: Auto-creación de usuario si no existe ---
     if (userResult.rows.length === 0) {
-      return res.status(404).json({ error: "Usuario no encontrado." });
+      const newUserQuery = `
+        INSERT INTO usuarios (nombre, correo, fecha_registro, rol, can_ask)
+        VALUES ($1, $2, NOW(), 'usuario', FALSE)
+        RETURNING id, nombre`;
+      const newUserResult = await pool.query(newUserQuery, [decodedToken.name || decodedToken.email, decodedToken.email]);
+      req.user = {
+        id: newUserResult.rows[0].id,
+        nombre: newUserResult.rows[0].nombre,
+      };
+      console.log(`✅ Nuevo usuario '${decodedToken.email}' creado con rol 'usuario'.`);
+    } else {
+      req.user = {
+        id: userResult.rows[0].id,
+        nombre: userResult.rows[0].nombre,
+      };
     }
-    // Se adjunta el id y el nombre al objeto req.user
-    req.user = {
-      id: userResult.rows[0].id,
-      nombre: userResult.rows[0].nombre,
-    };
     next();
   } catch (error) {
     console.error("Error en la verificación del token:", error.code);
@@ -94,18 +104,6 @@ app.get("/", (req, res) => {
   res.send("Servidor de WebSocket y Notificaciones está funcionando.");
 });
 
-// --- ENDPOINTS DE NOTIFICACIONES ---
-
-// En: websocket_serverjs_subido_en_render/server.js
-
-// En: server.js
-// REEMPLAZO PARA EL ENDPOINT /api/subscribe-fcm
-
-// En: server.js
-// REEMPLAZO PARA EL ENDPOINT /api/subscribe-fcm (CON LOGGING DE DIAGNÓSTICO)
-
-// En: server.js
-// VERSIÓN FINAL Y CORREGIDA DEL ENDPOINT /api/subscribe-fcm
 
 app.post("/api/subscribe-fcm", authenticateToken, async (req, res) => {
   const userId = req.user.id;
@@ -150,45 +148,32 @@ app.post("/api/subscribe-fcm", authenticateToken, async (req, res) => {
 // En tu server.js (Render)
 // VERSIÓN FINAL Y ROBUSTA PARA /api/notifications/send
 
+// --- ENDPOINT DE ENVÍO DE NOTIFICACIONES (CORREGIDO) ---
 app.post("/api/notifications/send", authenticateToken, async (req, res) => {
-  // 1. Verificación de permisos (sin cambios)
   try {
-    const userCheck = await pool.query(
-      "SELECT rol FROM usuarios WHERE id = $1",
-      [req.user.id]
-    );
+    const userCheck = await pool.query("SELECT rol FROM usuarios WHERE id = $1", [req.user.id]);
     if (userCheck.rows.length === 0 || userCheck.rows[0].rol !== "admin") {
-      return res
-        .status(403)
-        .json({ error: "Acceso denegado. Se requiere rol de administrador." });
+      return res.status(403).json({ error: "Acceso denegado. Se requiere rol de administrador." });
     }
   } catch (e) {
-    return res
-      .status(500)
-      .json({ error: "Error al verificar el rol del usuario." });
+    return res.status(500).json({ error: "Error al verificar el rol del usuario." });
   }
 
   const { title, body, url, image, segments } = req.body;
   if (!title || !body || !url) {
-    return res
-      .status(400)
-      .json({ error: "Faltan los campos title, body, o url." });
+    return res.status(400).json({ error: "Faltan los campos title, body, o url." });
   }
 
   const client = await pool.connect();
   try {
-    await client.query("BEGIN");
+    await client.query('BEGIN');
 
-    // --- INICIO DE LA SOLUCIÓN ARQUITECTÓNICA ---
-
-    // 2. OBTENER IDs DE USUARIO ÚNICOS
-    // En lugar de obtener tokens, obtenemos solo los IDs de los usuarios que cumplen con el segmento.
+    // --- SOLUCIÓN ARQUITECTÓNICA: LÓGICA DE NOTIFICACIONES CORREGIDA ---
+    // 1. OBTENER IDs DE USUARIO ÚNICOS
     let userIdsQuery;
     const queryParams = [];
     if (segments && segments.state) {
-      console.log(
-        `[DB] Obteniendo IDs de usuario para el estado: ${segments.state}`
-      );
+      console.log(`[DB] Obteniendo IDs de usuario para el estado: ${segments.state}`);
       userIdsQuery = `SELECT id FROM usuarios WHERE estado = $1`;
       queryParams.push(segments.state);
     } else {
@@ -196,116 +181,71 @@ app.post("/api/notifications/send", authenticateToken, async (req, res) => {
       userIdsQuery = "SELECT id FROM usuarios";
     }
     const userIdsResult = await client.query(userIdsQuery, queryParams);
-    const recipientUserIds = userIdsResult.rows.map((row) => row.id);
+    const recipientUserIds = userIdsResult.rows.map(row => row.id);
 
     if (recipientUserIds.length === 0) {
-      await client.query("COMMIT"); // Se debe hacer commit aunque no se envíe nada.
-      return res
-        .status(200)
-        .json({ message: "No hay usuarios que coincidan con el segmento." });
+      await client.query('COMMIT');
+      return res.status(200).json({ message: "No hay usuarios que coincidan con el segmento." });
     }
-
-    // 3. INSERTAR UNA NOTIFICACIÓN POR USUARIO
-    // Esto previene las notificaciones duplicadas en la UI.
-    console.log(
-      `[DB] Guardando ${recipientUserIds.length} registro(s) de notificación en el historial.`
-    );
+    
+    // 2. INSERTAR UNA NOTIFICACIÓN POR USUARIO
+    console.log(`[DB] Guardando ${recipientUserIds.length} registro(s) de notificación en el historial.`);
     const insertQuery = `INSERT INTO notificaciones (user_id, titulo, cuerpo, url, imagen) VALUES ($1, $2, $3, $4, $5)`;
     for (const userId of recipientUserIds) {
-      await client.query(insertQuery, [
-        userId,
-        title,
-        body,
-        url,
-        image || null,
-      ]);
+      await client.query(insertQuery, [userId, title, body, url, image || null]);
     }
-
-    // 4. NOTIFICAR A CLIENTES ACTIVOS VÍA WEBSOCKET
-    // Esto actualiza la campanita en tiempo real para los usuarios con la app abierta.
+    
+    // 3. NOTIFICAR A CLIENTES ACTIVOS VÍA WEBSOCKET
     wss.clients.forEach((wsClient) => {
-      // wsClient.userId es un string, por eso el parseInt
-      if (
-        wsClient.readyState === WebSocket.OPEN &&
-        recipientUserIds.includes(parseInt(wsClient.userId, 10))
-      ) {
-        console.log(
-          `[WS] Enviando ping de 'new_notification' al usuario ${wsClient.userId}`
-        );
-        wsClient.send(JSON.stringify({ type: "new_notification" }));
-      }
+        if (wsClient.readyState === WebSocket.OPEN && recipientUserIds.includes(parseInt(wsClient.userId, 10))) {
+            console.log(`[WS] Enviando ping de 'new_notification' al usuario ${wsClient.userId}`);
+            wsClient.send(JSON.stringify({ type: "new_notification" }));
+        }
     });
-
-    // 5. OBTENER TODOS LOS TOKENS Y ENVIAR PUSH
-    // Obtenemos los tokens de los usuarios seleccionados para el envío de la notificación push.
-    const tokensResult = await client.query(
-      "SELECT token FROM fcm_tokens WHERE user_id = ANY($1::int[])",
-      [recipientUserIds]
-    );
-    const tokens = tokensResult.rows.map((row) => row.token);
+    
+    // 4. OBTENER TODOS LOS TOKENS Y ENVIAR PUSH
+    const tokensResult = await client.query("SELECT token FROM fcm_tokens WHERE user_id = ANY($1::int[])", [recipientUserIds]);
+    const tokens = tokensResult.rows.map(row => row.token);
 
     let fcmResponse = { successCount: 0, failureCount: 0 };
     if (tokens.length > 0) {
-      console.log(
-        `[FCM] Enviando notificación push a ${tokens.length} dispositivo(s).`
-      );
+      console.log(`[FCM] Enviando notificación push a ${tokens.length} dispositivo(s).`);
       const messagePayload = {
-        data: {
-          title,
-          body,
-          image: image || "",
-          url,
-          icon: "https://chatcerex.com/img/icon-192.png",
-        },
-        tokens: tokens,
+          data: { title, body, image: image || "", url, icon: "https://chatcerex.com/img/icon-192.png" },
+          tokens: tokens,
       };
-      fcmResponse = await admin
-        .messaging()
-        .sendEachForMulticast(messagePayload);
-      console.log(
-        `[FCM] Notificaciones enviadas: ${fcmResponse.successCount} con éxito, ${fcmResponse.failureCount} fallaron.`
-      );
-
-      // (Opcional pero recomendado) Lógica de limpieza de tokens inválidos.
+      fcmResponse = await admin.messaging().sendEachForMulticast(messagePayload);
+      console.log(`[FCM] Notificaciones enviadas: ${fcmResponse.successCount} con éxito, ${fcmResponse.failureCount} fallaron.`);
+      
       if (fcmResponse.failureCount > 0) {
         const tokensToDelete = [];
         fcmResponse.responses.forEach((resp, idx) => {
-          if (!resp.success) {
-            const errorCode = resp.error.code;
-            if (
-              errorCode === "messaging/registration-token-not-registered" ||
-              errorCode === "messaging/invalid-registration-token"
-            ) {
-              tokensToDelete.push(tokens[idx]);
+            if (!resp.success) {
+                const errorCode = resp.error.code;
+                if (errorCode === "messaging/registration-token-not-registered" || errorCode === "messaging/invalid-registration-token") {
+                    tokensToDelete.push(tokens[idx]);
+                }
             }
-          }
         });
         if (tokensToDelete.length > 0) {
-          console.log(
-            `[FCM Cleanup] Eliminando ${tokensToDelete.length} tokens inválidos.`
-          );
-          await client.query(
-            "DELETE FROM fcm_tokens WHERE token = ANY($1::text[])",
-            [tokensToDelete]
-          );
+            console.log(`[FCM Cleanup] Eliminando ${tokensToDelete.length} tokens inválidos.`);
+            await client.query("DELETE FROM fcm_tokens WHERE token = ANY($1::text[])", [tokensToDelete]);
         }
       }
     }
     // --- FIN DE LA SOLUCIÓN ARQUITECTÓNICA ---
-
-    await client.query("COMMIT");
+    
+    await client.query('COMMIT');
 
     res.status(200).json({
       message: `Notificación enviada a ${recipientUserIds.length} usuario(s).`,
       successCount: fcmResponse.successCount,
       failureCount: fcmResponse.failureCount,
     });
+
   } catch (error) {
-    await client.query("ROLLBACK");
-    console.error(
-      `[FCM] Error fatal al enviar notificación, se hizo rollback:`,
-      error
-    );
+    await client.query('ROLLBACK');
+    console.error(`[FCM] Error fatal al enviar notificación, se hizo rollback:`, error);
     res.status(500).json({
       error: "Error interno del servidor al intentar enviar la notificación.",
     });
@@ -313,8 +253,6 @@ app.post("/api/notifications/send", authenticateToken, async (req, res) => {
     client.release();
   }
 });
-
-
 // **NUEVO ENDPOINT** para obtener las notificaciones no leídas
 app.get("/api/notifications/unread", authenticateToken, async (req, res) => {
 const userId = req.user.id;
@@ -577,12 +515,6 @@ app.get(
   }
 );
 
-// Endpoint 2: Enviar mensaje promocional a los interesados
-// --- Endpoint de envío de promociones MODIFICADO ---
-
-
-// En tu server.js (Render)
-// REEMPLAZO COMPLETO PARA /api/promociones/enviar
 
 app.post("/api/promociones/enviar", authenticateToken, async (req, res) => {
   const sender = req.user; // { id, nombre }
