@@ -5,6 +5,7 @@ const { Pool } = require("pg");
 const cors = require("cors");
 const admin = require("firebase-admin");
 const fs = require('fs');
+const axios = require("axios");
 
 // En server.js
 
@@ -314,75 +315,69 @@ app.post("/api/cerbot/message", authenticateToken, async (req, res) => {
     const isCerbotActive = sellerCheck.rows[0]?.cerbot_activo;
 
     if (isCerbotActive) {
-      const n8nReasoningWebhook =
-        "https://n8n.chatcerexapp.com/webhook/api_chappie/asistente_cerbot";
+      // --- INICIO DE LA SOLUCIÓN ARQUITECTÓNICA ---
+      // 1. Leemos la URL desde las variables de entorno. Es flexible y seguro.
+      const n8nReasoningWebhook = process.env.N8N_ASSISTANT_WEBHOOK_URL;
 
-      // --- INICIO DE LA SOLUCIÓN ---
-      // 1. Creamos un AbortController para manejar el timeout.
-      const controller = new AbortController();
-      const timeoutId = setTimeout(() => {
-        console.log(`[CERBOT_TIMEOUT] La solicitud a n8n ha superado los 15 segundos. Cancelando...`);
-        controller.abort();
-      }, 15000); // 15 segundos de tiempo de espera
+      // 2. Si la variable no está configurada en Render, fallamos de forma segura.
+      if (!n8nReasoningWebhook) {
+        console.error(
+          "[ERROR CRÍTICO] La variable de entorno N8N_ASSISTANT_WEBHOOK_URL no está configurada."
+        );
+        return res.status(500).json({
+          botResponse:
+            "Lo siento, la conexión con mi asistente de IA no está configurada.",
+        });
+      }
 
       try {
-        console.log(`[CERBOT_LOG] Realizando llamada a n8n con un timeout de 15s.`);
-        const n8nResponse = await fetch(n8nReasoningWebhook, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
+        console.log(
+          `[CERBOT_LOG] Realizando llamada a n8n: ${n8nReasoningWebhook}`
+        );
+
+        // 3. Usamos axios para una llamada más limpia con timeout explícito.
+        const n8nResponse = await axios.post(
+          n8nReasoningWebhook,
+          {
             sellerId: sellerId,
             user_question: message,
-          }),
-          // 2. Asociamos la señal del controller a nuestra petición.
-          signal: controller.signal, 
-        });
-
-        // 3. Si la respuesta llega a tiempo, limpiamos el timeout.
-        clearTimeout(timeoutId);
-
-        if (!n8nResponse.ok) {
-          throw new Error(
-            `El servicio de IA respondió con el estado: ${n8nResponse.status}`
-          );
-        }
-
-        const responseText = await n8nResponse.text();
-        if (!responseText) {
-          throw new Error("El servicio de IA devolvió una respuesta vacía.");
-        }
-        const responseData = JSON.parse(responseText);
+          },
+          {
+            timeout: 15000, // 15 segundos de tiempo de espera
+          }
+        );
 
         res.json({
           botResponse:
-            responseData.respuesta ||
+            n8nResponse.data.respuesta ||
             "No pude procesar la respuesta en este momento.",
         });
-
       } catch (n8nError) {
-        // 4. Limpiamos el timeout aquí también por si hay otros errores.
-        clearTimeout(timeoutId);
-
-        // Si el error es por el abort, es un timeout.
-        if (n8nError.name === 'AbortError') {
-          console.error("Error al contactar a n8n: La solicitud ha caducado (timeout).");
-          res.status(504).json({ // 504 Gateway Timeout es el código correcto
+        // 4. Manejo de errores mejorado con axios.
+        if (n8nError.code === "ECONNABORTED" || n8nError.code === "ETIMEDOUT") {
+          console.error(
+            "Error al contactar a n8n: La solicitud ha caducado (timeout)."
+          );
+          res.status(504).json({
+            // 504 Gateway Timeout es el código correcto
             botResponse:
               "Lo siento, mi asistente de IA está tardando mucho en responder. Intenta de nuevo más tarde.",
           });
         } else {
-          console.error("Error al contactar o procesar la respuesta de n8n:", n8nError);
+          console.error(
+            "Error al contactar o procesar la respuesta de n8n:",
+            n8nError.message
+          );
           res.status(500).json({
             botResponse:
               "Lo siento, mi asistente de IA no está disponible en este momento.",
           });
         }
       }
-      // --- FIN DE LA SOLUCIÓN ---
+      // --- FIN DE LA SOLUCIÓN ARQUITECTÓNICA ---
     } else {
       res.json({
-        botResponse:
-          "Este usuario no ha configurado su Cerbot a detalle...",
+        botResponse: "Este usuario no ha configurado su Cerbot a detalle...",
       });
     }
   } catch (error) {
