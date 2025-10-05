@@ -298,7 +298,7 @@ app.put("/api/notifications/mark-read/:id", authenticateToken, async (req, res) 
 app.post("/api/cerbot/message", authenticateToken, async (req, res) => {
   // --- CAMBIO 1: Extraemos los TRES campos del body ---
   const { sellerId, message, sessionId } = req.body;
-
+  
   // --- CAMBIO 2: Validamos los TRES campos ---
   if (!sellerId || !message || !sessionId) {
     return res
@@ -333,6 +333,16 @@ app.post("/api/cerbot/message", authenticateToken, async (req, res) => {
         });
       }
 
+      // 1. Crear el contexto de tiempo
+      const timeContext = new Date().toLocaleString("es-VE", {
+        weekday: "long",
+        year: "numeric",
+        month: "long",
+        day: "numeric",
+        hour: "numeric",
+        minute: "2-digit",
+      });
+
       try {
         console.log(
           `[CERBOT_LOG] Realizando llamada a n8n con sessionId: ${sessionId}`
@@ -345,6 +355,7 @@ app.post("/api/cerbot/message", authenticateToken, async (req, res) => {
             sellerId: sellerId,
             user_question: message,
             sessionId: sessionId,
+            timeContext: timeContext,
           },
           {
             timeout: 15000, // 15 segundos de tiempo de espera
