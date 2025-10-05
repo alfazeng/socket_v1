@@ -295,12 +295,15 @@ app.put("/api/notifications/mark-read/:id", authenticateToken, async (req, res) 
   }
 });
 
-
 app.post("/api/cerbot/message", authenticateToken, async (req, res) => {
-  const { sellerId, message } = req.body;
+  // --- CAMBIO 1: Extraemos los TRES campos del body ---
+  const { sellerId, message, sessionId } = req.body;
 
-  if (!sellerId || !message) {
-    return res.status(400).json({ error: "Faltan sellerId o message." });
+  // --- CAMBIO 2: Validamos los TRES campos ---
+  if (!sellerId || !message || !sessionId) {
+    return res
+      .status(400)
+      .json({ error: "Faltan sellerId, message, o sessionId." });
   }
 
   try {
@@ -318,11 +321,8 @@ app.post("/api/cerbot/message", authenticateToken, async (req, res) => {
     const isCerbotActive = sellerCheck.rows[0]?.cerbot_activo;
 
     if (isCerbotActive) {
-      // --- INICIO DE LA SOLUCIÓN ARQUITECTÓNICA ---
-      // 1. Leemos la URL desde las variables de entorno. Es flexible y seguro.
       const n8nReasoningWebhook = process.env.N8N_ASSISTANT_WEBHOOK_URL;
 
-      // 2. Si la variable no está configurada en Render, fallamos de forma segura.
       if (!n8nReasoningWebhook) {
         console.error(
           "[ERROR CRÍTICO] La variable de entorno N8N_ASSISTANT_WEBHOOK_URL no está configurada."
@@ -335,15 +335,16 @@ app.post("/api/cerbot/message", authenticateToken, async (req, res) => {
 
       try {
         console.log(
-          `[CERBOT_LOG] Realizando llamada a n8n: ${n8nReasoningWebhook}`
+          `[CERBOT_LOG] Realizando llamada a n8n con sessionId: ${sessionId}`
         );
 
-        // 3. Usamos axios para una llamada más limpia con timeout explícito.
         const n8nResponse = await axios.post(
           n8nReasoningWebhook,
+          // --- CAMBIO 3: Enviamos los TRES campos a n8n ---
           {
             sellerId: sellerId,
             user_question: message,
+            sessionId: sessionId,
           },
           {
             timeout: 15000, // 15 segundos de tiempo de espera
@@ -356,13 +357,11 @@ app.post("/api/cerbot/message", authenticateToken, async (req, res) => {
             "No pude procesar la respuesta en este momento.",
         });
       } catch (n8nError) {
-        // 4. Manejo de errores mejorado con axios.
         if (n8nError.code === "ECONNABORTED" || n8nError.code === "ETIMEDOUT") {
           console.error(
             "Error al contactar a n8n: La solicitud ha caducado (timeout)."
           );
           res.status(504).json({
-            // 504 Gateway Timeout es el código correcto
             botResponse:
               "Lo siento, mi asistente de IA está tardando mucho en responder. Intenta de nuevo más tarde.",
           });
@@ -377,7 +376,6 @@ app.post("/api/cerbot/message", authenticateToken, async (req, res) => {
           });
         }
       }
-      // --- FIN DE LA SOLUCIÓN ARQUITECTÓNICA ---
     } else {
       res.json({
         botResponse: "Este usuario no ha configurado su Cerbot a detalle...",
