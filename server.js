@@ -106,6 +106,9 @@ app.get("/", (req, res) => {
 });
 
 
+
+
+
 app.post("/api/subscribe-fcm", authenticateToken, async (req, res) => {
   const userId = req.user.id;
   const { fcmToken } = req.body;
@@ -466,7 +469,31 @@ app.delete(
   }
 );
 
-// --- ENDPOINTS PARA EL FLUJO DE CRM (NUEVOS) ---
+// En server.js, añade este nuevo endpoint para el agente de n8n
+
+app.get("/api/cerbot/search-knowledge", async (req, res) => {
+  // El agente pasará el sellerId como un parámetro de consulta
+  const { sellerId } = req.query;
+
+  if (!sellerId) {
+    return res.status(400).json({ error: "El parámetro sellerId es requerido." });
+  }
+
+  try {
+    console.log(`[AGENT_API] Buscando base de conocimiento para sellerId: ${sellerId}`);
+    const knowledge = await pool.query(
+      "SELECT pregunta, respuesta FROM cerbot_conocimiento WHERE user_id = $1",
+      [sellerId]
+    );
+    
+    // Devolvemos las filas encontradas como JSON
+    res.json(knowledge.rows);
+
+  } catch (error) {
+    console.error("Error al buscar en la base de conocimiento:", error);
+    res.status(500).json({ error: "Error interno del servidor." });
+  }
+});// --- ENDPOINTS PARA EL FLUJO DE CRM (NUEVOS) ---
 
 // Endpoint 1: Obtener la lista de usuarios interesados en una publicación
 app.get(
