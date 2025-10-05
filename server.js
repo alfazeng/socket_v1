@@ -298,7 +298,28 @@ app.put("/api/notifications/mark-read/:id", authenticateToken, async (req, res) 
 app.post("/api/cerbot/message", authenticateToken, async (req, res) => {
   // --- CAMBIO 1: Extraemos los TRES campos del body ---
   const { sellerId, message, sessionId } = req.body;
-  
+  const timeZone = "America/Caracas";
+  // 2. Obtenemos la hora actual (0-23) específicamente para esa zona horaria
+  const currentHour = parseInt(
+    new Date().toLocaleTimeString("en-US", {
+      timeZone: timeZone,
+      hour12: false,
+      hour: "2-digit",
+    })
+  );
+
+  // 3. Determinamos el saludo correcto con lógica mejorada
+  let timeOfDay;
+  if (currentHour >= 5 && currentHour < 12) {
+    timeOfDay = "mañana"; // 5:00 AM - 11:59 AM
+  } else if (currentHour >= 12 && currentHour < 19) {
+    timeOfDay = "tarde"; // 12:00 PM - 6:59 PM
+  } else if (currentHour >= 1 && currentHour < 5) {
+    timeOfDay = "madrugada"; // 1:00 AM - 4:59 AM
+  } else {
+    timeOfDay = "noche"; // 7:00 PM - 12:59 AM
+  }
+
   // --- CAMBIO 2: Validamos los TRES campos ---
   if (!sellerId || !message || !sessionId) {
     return res
@@ -333,8 +354,9 @@ app.post("/api/cerbot/message", authenticateToken, async (req, res) => {
         });
       }
 
-      // 1. Crear el contexto de tiempo
+      // 4. Creamos el texto de contexto completo para el prompt, también usando la zona horaria
       const timeContext = new Date().toLocaleString("es-VE", {
+        timeZone: timeZone,
         weekday: "long",
         year: "numeric",
         month: "long",
@@ -356,6 +378,7 @@ app.post("/api/cerbot/message", authenticateToken, async (req, res) => {
             user_question: message,
             sessionId: sessionId,
             timeContext: timeContext,
+            timeOfDay: timeOfDay,
           },
           {
             timeout: 15000, // 15 segundos de tiempo de espera
