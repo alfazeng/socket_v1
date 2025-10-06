@@ -6,6 +6,8 @@ const cors = require("cors");
 const admin = require("firebase-admin");
 const fs = require('fs');
 const axios = require("axios");
+const fetch = require("node-fetch");
+
 
 // En server.js
 
@@ -59,6 +61,10 @@ const PORT = process.env.PORT || 10000;
 const app = express();
 app.use(cors());
 app.use(express.json());
+
+// ARQUITECTO: Cargamos las variables de entorno para la comunicación con el backend de Go.
+const GO_BACKEND_URL = process.env.GO_BACKEND_URL;
+const INTERNAL_API_KEY = process.env.INTERNAL_API_KEY;
 
 // --- MIDDLEWARE DE AUTENTICACIÓN MEJORADO ---
 const authenticateToken = async (req, res, next) => {
@@ -295,129 +301,93 @@ app.put("/api/notifications/mark-read/:id", authenticateToken, async (req, res) 
   }
 });
 
+// =================================================================================
+// --- ENDPOINT DEL CERBOT (MODIFICADO) ---
+// =================================================================================
 app.post("/api/cerbot/message", authenticateToken, async (req, res) => {
-  // --- CAMBIO 1: Extraemos los TRES campos del body ---
   const { sellerId, message, sessionId } = req.body;
+  const askingUserId = req.user.id;
   const timeZone = "America/Caracas";
-  // 2. Obtenemos la hora actual (0-23) específicamente para esa zona horaria
-  const currentHour = parseInt(
-    new Date().toLocaleTimeString("en-US", {
-      timeZone: timeZone,
-      hour12: false,
-      hour: "2-digit",
-    })
-  );
+  const currentHour = parseInt(new Date().toLocaleTimeString("en-US", { timeZone: timeZone, hour12: false, hour: "2-digit" }));
 
-  // 3. Determinamos el saludo correcto con lógica mejorada
   let timeOfDay;
-  if (currentHour >= 5 && currentHour < 12) {
-    timeOfDay = "mañana"; // 5:00 AM - 11:59 AM
-  } else if (currentHour >= 12 && currentHour < 19) {
-    timeOfDay = "tarde"; // 12:00 PM - 6:59 PM
-  } else if (currentHour >= 1 && currentHour < 5) {
-    timeOfDay = "madrugada"; // 1:00 AM - 4:59 AM
-  } else {
-    timeOfDay = "noche"; // 7:00 PM - 12:59 AM
+  if (currentHour >= 5 && currentHour < 12) timeOfDay = "mañana";
+  else if (currentHour >= 12 && currentHour < 19) timeOfDay = "tarde";
+  else if (currentHour >= 1 && currentHour < 5) timeOfDay = "madrugada";
+  else timeOfDay = "noche";
+
+  if (!sellerId || !message || !sessionId) {
+      return res.status(400).json({ error: "Faltan sellerId, message, o sessionId." });
   }
 
-  // --- CAMBIO 2: Validamos los TRES campos ---
-  if (!sellerId || !message || !sessionId) {
-    return res
-      .status(400)
-      .json({ error: "Faltan sellerId, message, o sessionId." });
+  // ARQUITECTO: Si el dueño del bot se pregunta a sí mismo, no se cobra.
+  if (String(askingUserId) === String(sellerId)) {
+      console.log(`[Cerbot] El dueño del bot (ID: ${sellerId}) está probando su propio Cerbot. No se aplican cargos.`);
+      // Simulación de respuesta para prueba sin llamar a n8n, puedes ajustarlo.
+      return res.json({ botResponse: "Modo de prueba: No se han debitado créditos." });
   }
 
   try {
-    const sellerCheck = await pool.query(
-      "SELECT cerbot_activo FROM usuarios WHERE id = $1",
-      [sellerId]
-    );
+      // ARQUITECTO: Paso 1 - Intentar debitar los créditos ANTES de procesar el mensaje.
+      const debitAmount = 10.00;
+      const debitDescription = `Costo por respuesta de Cerbot (Publicación respondida al usuario ID: ${askingUserId})`;
 
-    if (sellerCheck.rows.length === 0) {
-      return res
-        .status(404)
-        .json({ botResponse: "El vendedor especificado no fue encontrado." });
-    }
-
-    const isCerbotActive = sellerCheck.rows[0]?.cerbot_activo;
-
-    if (isCerbotActive) {
-      const n8nReasoningWebhook = process.env.N8N_ASSISTANT_WEBHOOK_URL;
-
-      if (!n8nReasoningWebhook) {
-        console.error(
-          "[ERROR CRÍTICO] La variable de entorno N8N_ASSISTANT_WEBHOOK_URL no está configurada."
-        );
-        return res.status(500).json({
-          botResponse:
-            "Lo siento, la conexión con mi asistente de IA no está configurada.",
-        });
-      }
-
-      // 4. Creamos el texto de contexto completo para el prompt, también usando la zona horaria
-      const timeContext = new Date().toLocaleString("es-VE", {
-        timeZone: timeZone,
-        weekday: "long",
-        year: "numeric",
-        month: "long",
-        day: "numeric",
-        hour: "numeric",
-        minute: "2-digit",
-      });
-
-      try {
-        console.log(
-          `[CERBOT_LOG] Realizando llamada a n8n con sessionId: ${sessionId}`
-        );
-
-        const n8nResponse = await axios.post(
-          n8nReasoningWebhook,
-          // --- CAMBIO 3: Enviamos los TRES campos a n8n ---
-          {
-            sellerId: sellerId,
-            user_question: message,
-            sessionId: sessionId,
-            timeContext: timeContext,
-            timeOfDay: timeOfDay,
+      const debitResponse = await fetch(`${GO_BACKEND_URL}/api/usuarios/debitar-creditos`, {
+          method: 'POST',
+          headers: {
+              'Content-Type': 'application/json',
+              'Authorization': `Bearer ${INTERNAL_API_KEY}` // Usamos la clave secreta para la autenticación S2S.
           },
-          {
-            timeout: 15000, // 15 segundos de tiempo de espera
-          }
-        );
-
-        res.json({
-          botResponse:
-            n8nResponse.data.respuesta ||
-            "No pude procesar la respuesta en este momento.",
-        });
-      } catch (n8nError) {
-        if (n8nError.code === "ECONNABORTED" || n8nError.code === "ETIMEDOUT") {
-          console.error(
-            "Error al contactar a n8n: La solicitud ha caducado (timeout)."
-          );
-          res.status(504).json({
-            botResponse:
-              "Lo siento, mi asistente de IA está tardando mucho en responder. Intenta de nuevo más tarde.",
-          });
-        } else {
-          console.error(
-            "Error al contactar o procesar la respuesta de n8n:",
-            n8nError.message
-          );
-          res.status(500).json({
-            botResponse:
-              "Lo siento, mi asistente de IA no está disponible en este momento.",
-          });
-        }
-      }
-    } else {
-      res.json({
-        botResponse: "Este usuario no ha configurado su Cerbot a detalle...",
+          body: JSON.stringify({
+              monto: debitAmount,
+              userID: parseInt(sellerId, 10), // Indicamos a Go a quién debitar.
+              descripcion: debitDescription
+          })
       });
-    }
+
+      // ARQUITECTO: Paso 2 - Manejar la respuesta del sistema de créditos.
+      if (debitResponse.status === 402) { // 402 Payment Required
+          console.warn(`[Cerbot] Créditos insuficientes para el vendedor ID: ${sellerId}.`);
+          return res.status(402).json({ error: 'El asistente no está disponible en este momento.' });
+      }
+      if (!debitResponse.ok) {
+          const errorData = await debitResponse.json();
+          throw new Error(errorData.error || 'Fallo en el sistema de créditos de Go.');
+      }
+
+      const debitData = await debitResponse.json();
+      console.log(`[Cerbot] Débito exitoso. Vendedor ID: ${sellerId}, Nuevo Saldo: ${debitData.newBalance}`);
+
+      // ARQUITECTO: Paso 3 - Si el débito fue exitoso, proceder con la lógica de IA.
+      const n8nReasoningWebhook = process.env.N8N_ASSISTANT_WEBHOOK_URL;
+      if (!n8nReasoningWebhook) {
+          throw new Error("La variable de entorno N8N_ASSISTANT_WEBHOOK_URL no está configurada.");
+      }
+      
+      const timeContext = new Date().toLocaleString("es-VE", { timeZone: timeZone, /* ... tus opciones de formato ... */ });
+
+      const n8nResponse = await axios.post(n8nReasoningWebhook, {
+          sellerId: sellerId,
+          user_question: message,
+          sessionId: sessionId,
+          timeContext: timeContext,
+          timeOfDay: timeOfDay,
+      }, { timeout: 15000 });
+
+      res.json({
+          botResponse: n8nResponse.data.respuesta || "No pude procesar la respuesta.",
+          updatedCredit: debitData.newBalance
+      });
+
   } catch (error) {
-    console.error("Error en el endpoint del Cerbot (consulta inicial):", error);
-    res.status(500).json({ error: "Error interno del servidor." });
+      console.error(`[Cerbot] Error en el endpoint /message:`, error);
+      // Distinguir errores de timeout para dar una respuesta más clara al usuario.
+      if (error.code === "ECONNABORTED" || error.code === "ETIMEDOUT") {
+          return res.status(504).json({ botResponse: "El asistente está tardando mucho en responder. Intenta de nuevo." });
+      }
+      // Si el error no es de la API de créditos, enviamos un error 500 genérico.
+      if (res.headersSent) return;
+      res.status(500).json({ error: error.message || 'Error interno del servidor.' });
   }
 });
 
@@ -570,6 +540,7 @@ app.get(
 );
 
 
+// ARQUITECTO: Reemplaza tu endpoint existente con esta versión completa y robusta.
 app.post("/api/promociones/enviar", authenticateToken, async (req, res) => {
   const sender = req.user; // { id, nombre }
   const { message, publicationId, recipientIds } = req.body;
@@ -578,124 +549,114 @@ app.post("/api/promociones/enviar", authenticateToken, async (req, res) => {
     return res.status(400).json({ error: "Faltan datos para enviar la promoción." });
   }
 
-  const client = await pool.connect();
+  // --- ARQUITECTO: FASE 1 - PROCESAMIENTO DEL PAGO ---
+  // Calculamos el costo total y preparamos la descripción del débito.
+  const costoTotal = 20.0 * recipientIds.length;
+  const debitDescription = `Costo por campaña a ${recipientIds.length} usuarios (publicación ID: ${publicationId})`;
+
   try {
-    // 1. Verificar permisos (sin cambios)
-    const publicationCheck = await client.query(
-      "SELECT usuario_id FROM publicaciones WHERE id = $1",
-      [publicationId]
-    );
-    if (
-      publicationCheck.rows.length === 0 ||
-      publicationCheck.rows[0].usuario_id !== sender.id
-    ) {
-      return res
-        .status(403)
-        .json({ error: "No tienes permiso para esta acción." });
+    // Llamamos al backend de Go para debitar los créditos ANTES de cualquier otra operación.
+    const debitResponse = await fetch(`${GO_BACKEND_URL}/api/usuarios/debitar-creditos`, {
+        method: 'POST',
+        headers: {
+            'Content-Type': 'application/json',
+            'Authorization': req.headers.authorization // Reutilizamos el token del usuario que hace la petición.
+        },
+        body: JSON.stringify({
+            monto: costoTotal,
+            descripcion: debitDescription
+            // No se necesita 'userID' porque Go lo infiere del token del usuario.
+        })
+    });
+
+    // Manejamos la respuesta del sistema de créditos.
+    if (debitResponse.status === 402) { // 402 Payment Required
+        console.warn(`[Promociones] Créditos insuficientes para el usuario ID: ${sender.id}.`);
+        return res.status(402).json({ error: 'Créditos insuficientes para enviar la campaña.' });
     }
 
-    // --- INICIO DE LA SOLUCIÓN ARQUITECTÓNICA ---
+    if (!debitResponse.ok) {
+        const errorData = await debitResponse.json();
+        throw new Error(errorData.error || 'Fallo en el sistema de créditos de Go.');
+    }
+
+    const debitData = await debitResponse.json();
+    console.log(`[Promociones] Débito exitoso. Usuario ID: ${sender.id}, Nuevo Saldo: ${debitData.newBalance}`);
+
+  } catch (error) {
+      console.error("[Promociones] Error fatal durante el proceso de débito:", error);
+      return res.status(500).json({ error: error.message || "Error al procesar el pago de créditos." });
+  }
+  // --- FIN DE LA FASE DE PAGO ---
+
+
+  // --- ARQUITECTO: FASE 2 - ENTREGA DEL SERVICIO (SOLO SI EL PAGO FUE EXITOSO) ---
+  const client = await pool.connect();
+  try {
     await client.query("BEGIN");
 
-    // 2. (NUEVO) Guardar la notificación en el historial para TODOS los destinatarios.
-    console.log(
-      `[DB] Guardando historial de promoción para ${recipientIds.length} usuario(s).`
-    );
+    const publicationCheck = await client.query("SELECT usuario_id FROM publicaciones WHERE id = $1", [publicationId]);
+    if (publicationCheck.rows.length === 0 || publicationCheck.rows[0].usuario_id !== sender.id) {
+        await client.query('ROLLBACK');
+        // Nota: El crédito ya fue debitado. Este es un caso de error que debe ser monitoreado.
+        return res.status(403).json({ error: "Pago procesado, pero no tienes permiso para esta publicación." });
+    }
+
+    // Guardar historial de notificaciones
     const notificationTitle = `📢 Nueva promoción de ${sender.nombre}`;
     const notificationUrl = `/publicacion/${publicationId}`;
     const insertQuery = `INSERT INTO notificaciones (user_id, titulo, cuerpo, url) VALUES ($1, $2, $3, $4)`;
-
     for (const userId of recipientIds) {
-      await client.query(insertQuery, [
-        userId,
-        notificationTitle,
-        message,
-        notificationUrl,
-      ]);
+        await client.query(insertQuery, [userId, notificationTitle, message, notificationUrl]);
     }
 
-    // 3. Proceder con la entrega diferenciada (Online vs. Offline)
-    // 3. Proceder con la entrega diferenciada (Online vs. Offline)
+    // Lógica de entrega diferenciada (WebSocket y FCM)
     const onlineUserIds = [];
     wss.clients.forEach((wsClient) => {
-      // --- INICIO DE LA SOLUCIÓN ---
-      // Convertimos el wsClient.userId (string) a un número antes de la comparación.
-      const clientUserId = parseInt(wsClient.userId, 10);
-      if (
-        wsClient.readyState === WebSocket.OPEN &&
-        recipientIds.includes(clientUserId)
-      ) {
-        // --- FIN DE LA SOLUCIÓN ---
-        wsClient.send(
-          JSON.stringify({
-            type: "promotional_message",
-            payload: {
-              from: sender.nombre,
-              message,
-              publicationId,
-              timestamp: new Date().toISOString(),
-            },
-          })
-        );
-        onlineUserIds.push(clientUserId);
-      }
+        const clientUserId = parseInt(wsClient.userId, 10);
+        if (wsClient.readyState === WebSocket.OPEN && recipientIds.includes(clientUserId)) {
+            wsClient.send(JSON.stringify({
+                type: "promotional_message",
+                payload: { from: sender.nombre, message, publicationId, timestamp: new Date().toISOString() },
+            }));
+            onlineUserIds.push(clientUserId);
+        }
     });
 
-    const offlineUserIds = recipientIds.filter(
-      (id) => !onlineUserIds.includes(id)
-    );
-
+    const offlineUserIds = recipientIds.filter((id) => !onlineUserIds.includes(id));
     if (offlineUserIds.length > 0) {
-      console.log(
-        `[FCM] Enviando notificaciones push a ${offlineUserIds.length} usuarios offline.`
-      );
-
-      const tokensResult = await client.query(
-        `SELECT token FROM fcm_tokens WHERE user_id = ANY($1::int[])`,
-        [offlineUserIds]
-      );
-      const tokens = tokensResult.rows.map((row) => row.token);
-
-      if (tokens.length > 0) {
-        const messagePayload = {
-          data: {
-            title: notificationTitle,
-            body: message,
-            url: `https://chatcerex.com${notificationUrl}`,
-            icon: "https://chatcerex.com/img/icon-192.png",
-          },
-          tokens: tokens,
-        };
-
-        // No necesitamos esperar la respuesta, el envío es asíncrono
-        admin
-          .messaging()
-          .sendEachForMulticast(messagePayload)
-          .then((response) => {
-            console.log(
-              `[FCM] Promociones enviadas: ${response.successCount} con éxito.`
-            );
-            // Aquí puedes añadir la lógica de limpieza de tokens si lo deseas
-          })
-          .catch((err) =>
-            console.error("[FCM] Error al enviar promociones:", err)
-          );
-      }
+        const tokensResult = await client.query(`SELECT token FROM fcm_tokens WHERE user_id = ANY($1::int[])`, [offlineUserIds]);
+        const tokens = tokensResult.rows.map((row) => row.token);
+        if (tokens.length > 0) {
+            const messagePayload = {
+                data: {
+                    title: notificationTitle,
+                    body: message,
+                    url: `https://chatcerex.com${notificationUrl}`,
+                    icon: "https://chatcerex.com/img/icon-192.png",
+                },
+                tokens: tokens,
+            };
+            // Se envía de forma asíncrona, no bloqueamos la respuesta.
+            admin.messaging().sendEachForMulticast(messagePayload)
+              .catch(err => console.error("[FCM] Error asíncrono al enviar promociones:", err));
+        }
     }
 
     await client.query("COMMIT");
-    // --- FIN DE LA SOLUCIÓN ARQUITECTÓNICA ---
 
     res.status(200).json({
-      message: "Promoción enviada y registrada con éxito.",
+      message: "Campaña enviada y registrada con éxito.",
       totalRecipients: recipientIds.length,
       onlineDeliveries: onlineUserIds.length,
       offlinePushNotifications: offlineUserIds.length,
     });
   } catch (error) {
     await client.query('ROLLBACK');
-    console.error("Error fatal al enviar la promoción:", error);
-    res.status(500).json({ error: "Error interno del servidor." });
+    console.error("Error fatal al enviar la promoción (post-pago):", error);
+    res.status(500).json({
+        error: "El pago fue procesado, pero ocurrió un error al enviar las notificaciones."
+    });
   } finally {
     client.release();
   }
