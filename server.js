@@ -4,15 +4,16 @@ const http = require("http");
 const { Pool } = require("pg");
 const cors = require("cors");
 const admin = require("firebase-admin");
-const fs = require('fs');
 const axios = require("axios");
 const fetch = require("node-fetch");
+const multer = require("multer");
+const FormData = require("form-data");
+const fs = require("fs"); 
 
-
-// En server.js
-
-// En server.js
-// En server.js
+// --- Configuración de Multer ---
+// Usamos almacenamiento en memoria porque solo actuamos como proxy.
+const storage = multer.memoryStorage();
+const upload = multer({ storage: storage });
 
 try {
   // 1. Leemos la variable codificada en Base64
@@ -653,72 +654,80 @@ app.post("/api/promociones/enviar", authenticateToken, async (req, res) => {
 });
 
 
-// ARQUITECTO: Nuevo endpoint para orquestar la edición y el cobro de una publicación.
-app.put("/api/publicaciones/:id", authenticateToken, async (req, res) => {
+// ARQUITECTO: Endpoint de EDICIÓN completamente reescrito
+app.put("/api/publicaciones/:id", 
+  authenticateToken, 
+  upload.array('images', 3), // Usamos el middleware de multer aquí. 'images' debe coincidir con el nombre del campo en el FormData del cliente.
+  async (req, res) => {
+  
   const userId = req.user.id;
   const postId = req.params.id;
-  const postData = req.body; // Esto contendrá { titulo, descripcion, category, tags }
 
-  // --- FASE 1: PROCESAMIENTO DEL PAGO ---
+  // --- FASE 1: PROCESAMIENTO DEL PAGO (sin cambios, ya funciona) ---
   try {
       const debitAmount = 100.00;
       const debitDescription = `Costo por edición de publicación ID: ${postId}`;
 
-      // Llamamos al backend de Go para debitar los créditos del usuario que está editando.
       const debitResponse = await fetch(`${GO_BACKEND_URL}/api/usuarios/debitar-creditos`, {
           method: 'POST',
-          headers: {
-              'Content-Type': 'application/json',
-              'Authorization': req.headers.authorization // Reutilizamos el token del usuario.
-          },
-          body: JSON.stringify({
-              monto: debitAmount,
-              descripcion: debitDescription
-          })
+          headers: { 'Content-Type': 'application/json', 'Authorization': req.headers.authorization },
+          body: JSON.stringify({ monto: debitAmount, descripcion: debitDescription })
       });
 
-      // Si no hay créditos, detenemos la operación.
       if (debitResponse.status === 402) {
-          return res.status(402).json({ error: 'Créditos insuficientes para editar la publicación.' });
+          return res.status(402).json({ error: 'Créditos insuficientes para editar.' });
       }
       if (!debitResponse.ok) {
           const errorData = await debitResponse.json();
-          throw new Error(errorData.error || 'Fallo en el sistema de créditos de Go.');
+          throw new Error(errorData.error || 'Fallo en el sistema de créditos.');
       }
-
-      console.log(`[Edición] Débito de ${debitAmount} créditos exitoso para el usuario ID: ${userId}`);
-
+      console.log(`[Edición] Débito de ${debitAmount} exitoso para el usuario ID: ${userId}`);
   } catch (error) {
-      console.error("[Edición] Error durante el proceso de débito:", error);
-      return res.status(500).json({ error: error.message || "Error al procesar el pago de créditos." });
+      console.error("[Edición] Error durante el débito:", error);
+      return res.status(500).json({ error: error.message || "Error al procesar el pago." });
   }
-  // --- FIN DE LA FASE DE PAGO ---
 
-
-  // --- FASE 2: ACTUALIZACIÓN DE LA PUBLICACIÓN (SOLO SI EL PAGO FUE EXITOSO) ---
+  // --- FASE 2: RECONSTRUCCIÓN Y ENVÍO DEL FORMDATA A GO ---
   try {
-      // Ahora que el pago está confirmado, le pedimos a Go que actualice los datos del post.
+      // ARQUITECTO: Creamos un nuevo FormData para reenviar los datos.
+      const formData = new FormData();
+
+      // 1. Añadimos los campos de texto que multer ha parseado en req.body
+      formData.append('titulo', req.body.titulo);
+      formData.append('descripcion', req.body.descripcion);
+      formData.append('category', req.body.category);
+      formData.append('tags', req.body.tags); // Asumiendo que las tags vienen como un string JSON
+
+      // 2. Añadimos los archivos (si los hay) que multer ha puesto en req.files
+      if (req.files && req.files.length > 0) {
+          req.files.forEach(file => {
+              // Usamos el buffer del archivo en memoria.
+              formData.append('images', file.buffer, { filename: file.originalname });
+          });
+      }
+      
+      // 3. Reenviamos la petición a Go, esta vez como multipart/form-data
       const updateResponse = await fetch(`${GO_BACKEND_URL}/api/publicaciones/${postId}`, {
           method: 'PUT',
           headers: {
-              'Content-Type': 'application/json',
-              'Authorization': req.headers.authorization // Go usa este token de nuevo para verificar que el usuario es el dueño.
+              // ARQUITECTO: ¡Crucial! Dejamos que node-fetch establezca el Content-Type y el boundary por nosotros.
+              // No lo definimos manualmente.
+              ...formData.getHeaders(),
+              'Authorization': req.headers.authorization
           },
-          body: JSON.stringify(postData) // Enviamos solo los datos de texto.
+          body: formData
       });
 
       if (!updateResponse.ok) {
           const errorData = await updateResponse.json();
-          // NOTA IMPORTANTE: En este punto el crédito ya fue debitado.
-          // Un error aquí es crítico y debe ser monitoreado.
-          throw new Error(errorData.error || 'El pago fue exitoso, pero la actualización de la publicación falló.');
+          throw new Error(errorData.error || 'El pago fue exitoso, pero la actualización falló.');
       }
 
       const updateData = await updateResponse.json();
       res.status(200).json(updateData);
 
   } catch (error) {
-      console.error("[Edición] Error durante la fase de actualización post-pago:", error);
+      console.error("[Edición] Error en fase de actualización:", error);
       res.status(500).json({ error: error.message });
   }
 });
