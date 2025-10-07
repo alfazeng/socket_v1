@@ -322,35 +322,49 @@ app.post("/api/cerbot/message", authenticateToken, async (req, res) => {
       if (isTestMode) {
           console.log(`[Cerbot] MODO PRUEBA: El dueño (ID: ${sellerId}) está probando su bot. No se aplican cargos.`);
       } else {
-          // FLUJO DE PRODUCCIÓN: Se debita al vendedor.
-          const debitAmount = 10.00;
-          const debitDescription = `Costo por respuesta de Cerbot (al usuario ID: ${askingUserId})`;
+        // Lee el costo desde la variable de entorno, con un fallback.
+        const debitAmount =
+          parseFloat(process.env.COST_CERBOT_RESPONSE) || 2.00;
+        const debitDescription = `Costo por respuesta de Cerbot (al usuario ID: ${askingUserId})`;
 
-          const debitResponse = await fetch(`${GO_BACKEND_URL}/api/usuarios/debitar-creditos`, {
-              method: 'POST',
-              headers: {
-                  'Content-Type': 'application/json',
-                  'Authorization': `Bearer ${INTERNAL_API_KEY}`
-              },
-              body: JSON.stringify({
-                  monto: debitAmount,
-                  userID: parseInt(sellerId, 10),
-                  descripcion: debitDescription
-              })
-          });
-
-          if (debitResponse.status === 402) {
-              console.warn(`[Cerbot] Créditos insuficientes para el vendedor ID: ${sellerId}.`);
-              return res.status(402).json({ error: 'El asistente no está disponible en este momento.' });
+        const debitResponse = await fetch(
+          `${GO_BACKEND_URL}/api/usuarios/debitar-creditos`,
+          {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+              Authorization: `Bearer ${INTERNAL_API_KEY}`,
+            },
+            body: JSON.stringify({
+              monto: debitAmount,
+              userID: parseInt(sellerId, 10),
+              descripcion: debitDescription,
+            }),
           }
-          if (!debitResponse.ok) {
-              const errorData = await debitResponse.json();
-              throw new Error(errorData.error || 'Fallo en el sistema de créditos de Go.');
-          }
+        );
 
-          const debitData = await debitResponse.json();
-          updatedCredit = debitData.newBalance; // Guardamos el nuevo saldo para la respuesta.
-          console.log(`[Cerbot] Débito exitoso. Vendedor ID: ${sellerId}, Nuevo Saldo: ${updatedCredit}`);
+        if (debitResponse.status === 402) {
+          console.warn(
+            `[Cerbot] Créditos insuficientes para el vendedor ID: ${sellerId}.`
+          );
+          return res
+            .status(402)
+            .json({
+              error: "El asistente no está disponible en este momento.",
+            });
+        }
+        if (!debitResponse.ok) {
+          const errorData = await debitResponse.json();
+          throw new Error(
+            errorData.error || "Fallo en el sistema de créditos de Go."
+          );
+        }
+
+        const debitData = await debitResponse.json();
+        updatedCredit = debitData.newBalance; // Guardamos el nuevo saldo para la respuesta.
+        console.log(
+          `[Cerbot] Débito exitoso. Vendedor ID: ${sellerId}, Nuevo Saldo: ${updatedCredit}`
+        );
       }
       // --- FIN DE LA LÓGICA DE CRÉDITOS CONDICIONAL ---
 
@@ -536,61 +550,98 @@ app.post("/api/promociones/enviar", authenticateToken, async (req, res) => {
   const sender = req.user; // { id, nombre }
   const { message, publicationId, recipientIds } = req.body;
 
-  if (!message || !publicationId || !Array.isArray(recipientIds) || recipientIds.length === 0) {
-    return res.status(400).json({ error: "Faltan datos para enviar la promoción." });
+  if (
+    !message ||
+    !publicationId ||
+    !Array.isArray(recipientIds) ||
+    recipientIds.length === 0
+  ) {
+    return res
+      .status(400)
+      .json({ error: "Faltan datos para enviar la promoción." });
   }
 
   // --- ARQUITECTO: FASE 1 - PROCESAMIENTO DEL PAGO ---
   // Calculamos el costo total y preparamos la descripción del débito.
-  const costoTotal = 20.0 * recipientIds.length;
+  // Lee el costo por usuario desde la variable de entorno.
+  const costPerUser = parseFloat(process.env.COST_PROMOTION_PER_USER) || 10.0;
+  const costoTotal = costPerUser * recipientIds.length;
   const debitDescription = `Costo por campaña a ${recipientIds.length} usuarios (publicación ID: ${publicationId})`;
 
   try {
     // Llamamos al backend de Go para debitar los créditos ANTES de cualquier otra operación.
-    const debitResponse = await fetch(`${GO_BACKEND_URL}/api/usuarios/debitar-creditos`, {
-        method: 'POST',
+    const debitResponse = await fetch(
+      `${GO_BACKEND_URL}/api/usuarios/debitar-creditos`,
+      {
+        method: "POST",
         headers: {
-            'Content-Type': 'application/json',
-            'Authorization': req.headers.authorization // Reutilizamos el token del usuario que hace la petición.
+          "Content-Type": "application/json",
+          Authorization: req.headers.authorization, // Reutilizamos el token del usuario que hace la petición.
         },
         body: JSON.stringify({
-            monto: costoTotal,
-            descripcion: debitDescription
-            // No se necesita 'userID' porque Go lo infiere del token del usuario.
-        })
-    });
+          monto: costoTotal,
+          descripcion: debitDescription,
+          // No se necesita 'userID' porque Go lo infiere del token del usuario.
+        }),
+      }
+    );
 
     // Manejamos la respuesta del sistema de créditos.
-    if (debitResponse.status === 402) { // 402 Payment Required
-        console.warn(`[Promociones] Créditos insuficientes para el usuario ID: ${sender.id}.`);
-        return res.status(402).json({ error: 'Créditos insuficientes para enviar la campaña.' });
+    if (debitResponse.status === 402) {
+      // 402 Payment Required
+      console.warn(
+        `[Promociones] Créditos insuficientes para el usuario ID: ${sender.id}.`
+      );
+      return res
+        .status(402)
+        .json({ error: "Créditos insuficientes para enviar la campaña." });
     }
 
     if (!debitResponse.ok) {
-        const errorData = await debitResponse.json();
-        throw new Error(errorData.error || 'Fallo en el sistema de créditos de Go.');
+      const errorData = await debitResponse.json();
+      throw new Error(
+        errorData.error || "Fallo en el sistema de créditos de Go."
+      );
     }
 
     const debitData = await debitResponse.json();
-    console.log(`[Promociones] Débito exitoso. Usuario ID: ${sender.id}, Nuevo Saldo: ${debitData.newBalance}`);
-
+    console.log(
+      `[Promociones] Débito exitoso. Usuario ID: ${sender.id}, Nuevo Saldo: ${debitData.newBalance}`
+    );
   } catch (error) {
-      console.error("[Promociones] Error fatal durante el proceso de débito:", error);
-      return res.status(500).json({ error: error.message || "Error al procesar el pago de créditos." });
+    console.error(
+      "[Promociones] Error fatal durante el proceso de débito:",
+      error
+    );
+    return res
+      .status(500)
+      .json({
+        error: error.message || "Error al procesar el pago de créditos.",
+      });
   }
   // --- FIN DE LA FASE DE PAGO ---
-
 
   // --- ARQUITECTO: FASE 2 - ENTREGA DEL SERVICIO (SOLO SI EL PAGO FUE EXITOSO) ---
   const client = await pool.connect();
   try {
     await client.query("BEGIN");
 
-    const publicationCheck = await client.query("SELECT usuario_id FROM publicaciones WHERE id = $1", [publicationId]);
-    if (publicationCheck.rows.length === 0 || publicationCheck.rows[0].usuario_id !== sender.id) {
-        await client.query('ROLLBACK');
-        // Nota: El crédito ya fue debitado. Este es un caso de error que debe ser monitoreado.
-        return res.status(403).json({ error: "Pago procesado, pero no tienes permiso para esta publicación." });
+    const publicationCheck = await client.query(
+      "SELECT usuario_id FROM publicaciones WHERE id = $1",
+      [publicationId]
+    );
+    if (
+      publicationCheck.rows.length === 0 ||
+      publicationCheck.rows[0].usuario_id !== sender.id
+    ) {
+      await client.query("ROLLBACK");
+      // Nota: El crédito ya fue debitado. Este es un caso de error que debe ser monitoreado.
+      return res
+        .status(403)
+        .json({
+          error:
+            "Pago procesado, pero no tienes permiso para esta publicación.",
+        });
     }
 
     // Guardar historial de notificaciones
@@ -598,40 +649,64 @@ app.post("/api/promociones/enviar", authenticateToken, async (req, res) => {
     const notificationUrl = `/publicacion/${publicationId}`;
     const insertQuery = `INSERT INTO notificaciones (user_id, titulo, cuerpo, url) VALUES ($1, $2, $3, $4)`;
     for (const userId of recipientIds) {
-        await client.query(insertQuery, [userId, notificationTitle, message, notificationUrl]);
+      await client.query(insertQuery, [
+        userId,
+        notificationTitle,
+        message,
+        notificationUrl,
+      ]);
     }
 
     // Lógica de entrega diferenciada (WebSocket y FCM)
     const onlineUserIds = [];
     wss.clients.forEach((wsClient) => {
-        const clientUserId = parseInt(wsClient.userId, 10);
-        if (wsClient.readyState === WebSocket.OPEN && recipientIds.includes(clientUserId)) {
-            wsClient.send(JSON.stringify({
-                type: "promotional_message",
-                payload: { from: sender.nombre, message, publicationId, timestamp: new Date().toISOString() },
-            }));
-            onlineUserIds.push(clientUserId);
-        }
+      const clientUserId = parseInt(wsClient.userId, 10);
+      if (
+        wsClient.readyState === WebSocket.OPEN &&
+        recipientIds.includes(clientUserId)
+      ) {
+        wsClient.send(
+          JSON.stringify({
+            type: "promotional_message",
+            payload: {
+              from: sender.nombre,
+              message,
+              publicationId,
+              timestamp: new Date().toISOString(),
+            },
+          })
+        );
+        onlineUserIds.push(clientUserId);
+      }
     });
 
-    const offlineUserIds = recipientIds.filter((id) => !onlineUserIds.includes(id));
+    const offlineUserIds = recipientIds.filter(
+      (id) => !onlineUserIds.includes(id)
+    );
     if (offlineUserIds.length > 0) {
-        const tokensResult = await client.query(`SELECT token FROM fcm_tokens WHERE user_id = ANY($1::int[])`, [offlineUserIds]);
-        const tokens = tokensResult.rows.map((row) => row.token);
-        if (tokens.length > 0) {
-            const messagePayload = {
-                data: {
-                    title: notificationTitle,
-                    body: message,
-                    url: `https://chatcerex.com${notificationUrl}`,
-                    icon: "https://chatcerex.com/img/icon-192.png",
-                },
-                tokens: tokens,
-            };
-            // Se envía de forma asíncrona, no bloqueamos la respuesta.
-            admin.messaging().sendEachForMulticast(messagePayload)
-              .catch(err => console.error("[FCM] Error asíncrono al enviar promociones:", err));
-        }
+      const tokensResult = await client.query(
+        `SELECT token FROM fcm_tokens WHERE user_id = ANY($1::int[])`,
+        [offlineUserIds]
+      );
+      const tokens = tokensResult.rows.map((row) => row.token);
+      if (tokens.length > 0) {
+        const messagePayload = {
+          data: {
+            title: notificationTitle,
+            body: message,
+            url: `https://chatcerex.com${notificationUrl}`,
+            icon: "https://chatcerex.com/img/icon-192.png",
+          },
+          tokens: tokens,
+        };
+        // Se envía de forma asíncrona, no bloqueamos la respuesta.
+        admin
+          .messaging()
+          .sendEachForMulticast(messagePayload)
+          .catch((err) =>
+            console.error("[FCM] Error asíncrono al enviar promociones:", err)
+          );
+      }
     }
 
     await client.query("COMMIT");
@@ -643,10 +718,11 @@ app.post("/api/promociones/enviar", authenticateToken, async (req, res) => {
       offlinePushNotifications: offlineUserIds.length,
     });
   } catch (error) {
-    await client.query('ROLLBACK');
+    await client.query("ROLLBACK");
     console.error("Error fatal al enviar la promoción (post-pago):", error);
     res.status(500).json({
-        error: "El pago fue procesado, pero ocurrió un error al enviar las notificaciones."
+      error:
+        "El pago fue procesado, pero ocurrió un error al enviar las notificaciones.",
     });
   } finally {
     client.release();
@@ -665,7 +741,7 @@ app.put("/api/publicaciones/:id",
 
   // --- FASE 1: PROCESAMIENTO DEL PAGO (sin cambios, ya funciona) ---
   try {
-      const debitAmount = 100.00;
+      const debitAmount = parseFloat(process.env.COST_POST_EDIT) || 100.0;
       const debitDescription = `Costo por edición de publicación ID: ${postId}`;
 
       const debitResponse = await fetch(`${GO_BACKEND_URL}/api/usuarios/debitar-creditos`, {
