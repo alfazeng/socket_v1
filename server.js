@@ -304,67 +304,69 @@ app.put("/api/notifications/mark-read/:id", authenticateToken, async (req, res) 
 // =================================================================================
 // --- ENDPOINT DEL CERBOT (MODIFICADO) ---
 // =================================================================================
+// ARQUITECTO: Reemplaza tu endpoint existente con esta versión corregida.
 app.post("/api/cerbot/message", authenticateToken, async (req, res) => {
   const { sellerId, message, sessionId } = req.body;
   const askingUserId = req.user.id;
-  const timeZone = "America/Caracas";
-  const currentHour = parseInt(new Date().toLocaleTimeString("en-US", { timeZone: timeZone, hour12: false, hour: "2-digit" }));
-
-  let timeOfDay;
-  if (currentHour >= 5 && currentHour < 12) timeOfDay = "mañana";
-  else if (currentHour >= 12 && currentHour < 19) timeOfDay = "tarde";
-  else if (currentHour >= 1 && currentHour < 5) timeOfDay = "madrugada";
-  else timeOfDay = "noche";
-
+  
   if (!sellerId || !message || !sessionId) {
       return res.status(400).json({ error: "Faltan sellerId, message, o sessionId." });
   }
 
-  // ARQUITECTO: Si el dueño del bot se pregunta a sí mismo, no se cobra.
-  if (String(askingUserId) === String(sellerId)) {
-      console.log(`[Cerbot] El dueño del bot (ID: ${sellerId}) está probando su propio Cerbot. No se aplican cargos.`);
-      // Simulación de respuesta para prueba sin llamar a n8n, puedes ajustarlo.
-      return res.json({ botResponse: "Modo de prueba: No se han debitado créditos." });
-  }
+  const isTestMode = String(askingUserId) === String(sellerId);
+  let updatedCredit = null;
 
   try {
-      // ARQUITECTO: Paso 1 - Intentar debitar los créditos ANTES de procesar el mensaje.
-      const debitAmount = 10.00;
-      const debitDescription = `Costo por respuesta de Cerbot (Publicación respondida al usuario ID: ${askingUserId})`;
+      // --- INICIO DE LA LÓGICA DE CRÉDITOS CONDICIONAL ---
+      if (isTestMode) {
+          console.log(`[Cerbot] MODO PRUEBA: El dueño (ID: ${sellerId}) está probando su bot. No se aplican cargos.`);
+      } else {
+          // FLUJO DE PRODUCCIÓN: Se debita al vendedor.
+          const debitAmount = 10.00;
+          const debitDescription = `Costo por respuesta de Cerbot (al usuario ID: ${askingUserId})`;
 
-      const debitResponse = await fetch(`${GO_BACKEND_URL}/api/usuarios/debitar-creditos`, {
-          method: 'POST',
-          headers: {
-              'Content-Type': 'application/json',
-              'Authorization': `Bearer ${INTERNAL_API_KEY}` // Usamos la clave secreta para la autenticación S2S.
-          },
-          body: JSON.stringify({
-              monto: debitAmount,
-              userID: parseInt(sellerId, 10), // Indicamos a Go a quién debitar.
-              descripcion: debitDescription
-          })
-      });
+          const debitResponse = await fetch(`${GO_BACKEND_URL}/api/usuarios/debitar-creditos`, {
+              method: 'POST',
+              headers: {
+                  'Content-Type': 'application/json',
+                  'Authorization': `Bearer ${INTERNAL_API_KEY}`
+              },
+              body: JSON.stringify({
+                  monto: debitAmount,
+                  userID: parseInt(sellerId, 10),
+                  descripcion: debitDescription
+              })
+          });
 
-      // ARQUITECTO: Paso 2 - Manejar la respuesta del sistema de créditos.
-      if (debitResponse.status === 402) { // 402 Payment Required
-          console.warn(`[Cerbot] Créditos insuficientes para el vendedor ID: ${sellerId}.`);
-          return res.status(402).json({ error: 'El asistente no está disponible en este momento.' });
+          if (debitResponse.status === 402) {
+              console.warn(`[Cerbot] Créditos insuficientes para el vendedor ID: ${sellerId}.`);
+              return res.status(402).json({ error: 'El asistente no está disponible en este momento.' });
+          }
+          if (!debitResponse.ok) {
+              const errorData = await debitResponse.json();
+              throw new Error(errorData.error || 'Fallo en el sistema de créditos de Go.');
+          }
+
+          const debitData = await debitResponse.json();
+          updatedCredit = debitData.newBalance; // Guardamos el nuevo saldo para la respuesta.
+          console.log(`[Cerbot] Débito exitoso. Vendedor ID: ${sellerId}, Nuevo Saldo: ${updatedCredit}`);
       }
-      if (!debitResponse.ok) {
-          const errorData = await debitResponse.json();
-          throw new Error(errorData.error || 'Fallo en el sistema de créditos de Go.');
-      }
+      // --- FIN DE LA LÓGICA DE CRÉDITOS CONDICIONAL ---
 
-      const debitData = await debitResponse.json();
-      console.log(`[Cerbot] Débito exitoso. Vendedor ID: ${sellerId}, Nuevo Saldo: ${debitData.newBalance}`);
-
-      // ARQUITECTO: Paso 3 - Si el débito fue exitoso, proceder con la lógica de IA.
+      // ARQUITECTO: La lógica de la IA ahora se ejecuta para AMBOS flujos (prueba y producción).
       const n8nReasoningWebhook = process.env.N8N_ASSISTANT_WEBHOOK_URL;
       if (!n8nReasoningWebhook) {
-          throw new Error("La variable de entorno N8N_ASSISTANT_WEBHOOK_URL no está configurada.");
+          throw new Error("N8N_ASSISTANT_WEBHOOK_URL no está configurada.");
       }
-      
-      const timeContext = new Date().toLocaleString("es-VE", { timeZone: timeZone, /* ... tus opciones de formato ... */ });
+
+      const timeZone = "America/Caracas";
+      const currentHour = parseInt(new Date().toLocaleTimeString("en-US", { timeZone, hour12: false, hour: "2-digit" }));
+      let timeOfDay;
+      if (currentHour >= 5 && currentHour < 12) timeOfDay = "mañana";
+      else if (currentHour >= 12 && currentHour < 19) timeOfDay = "tarde";
+      else if (currentHour >= 1 && currentHour < 5) timeOfDay = "madrugada";
+      else timeOfDay = "noche";
+      const timeContext = new Date().toLocaleString("es-VE", { timeZone });
 
       const n8nResponse = await axios.post(n8nReasoningWebhook, {
           sellerId: sellerId,
@@ -374,33 +376,20 @@ app.post("/api/cerbot/message", authenticateToken, async (req, res) => {
           timeOfDay: timeOfDay,
       }, { timeout: 15000 });
 
+      // Enviamos la respuesta de la IA y el nuevo saldo (si aplica).
       res.json({
-          botResponse: n8nResponse.data.respuesta || "No pude procesar la respuesta.",
-          updatedCredit: debitData.newBalance
+          botResponse: n8nResponse.data.respuesta || "No pude procesar la respuesta en este momento.",
+          updatedCredit: updatedCredit // Será `null` en modo de prueba, o el nuevo saldo en producción.
       });
 
   } catch (error) {
       console.error(`[Cerbot] Error en el endpoint /message:`, error);
-      // Distinguir errores de timeout para dar una respuesta más clara al usuario.
-      if (error.code === "ECONNABORTED" || error.code === "ETIMEDOUT") {
-          return res.status(504).json({ botResponse: "El asistente está tardando mucho en responder. Intenta de nuevo." });
+      if (axios.isAxiosError(error) && (error.code === "ECONNABORTED" || error.code === "ETIMEDOUT")) {
+          return res.status(504).json({ botResponse: "El asistente está tardando mucho en responder. Intenta de nuevo más tarde." });
       }
-      // Si el error no es de la API de créditos, enviamos un error 500 genérico.
-      if (res.headersSent) return;
-      res.status(500).json({ error: error.message || 'Error interno del servidor.' });
-  }
-});
-
-app.get("/api/cerbot/knowledge", authenticateToken, async (req, res) => {
-  const userId = req.user.id;
-  try {
-    const knowledge = await pool.query(
-      "SELECT id, categoria, pregunta, respuesta FROM cerbot_conocimiento WHERE user_id = $1 ORDER BY categoria, id",
-      [userId]
-    );
-    res.json(knowledge.rows);
-  } catch (error) {
-    res.status(500).json({ error: "Error interno del servidor." });
+      if (!res.headersSent) {
+          return res.status(500).json({ error: error.message || 'Error interno del servidor.' });
+      }
   }
 });
 
