@@ -305,7 +305,7 @@ app.put("/api/notifications/mark-read/:id", authenticateToken, async (req, res) 
 // =================================================================================
 // --- ENDPOINT DEL CERBOT (MODIFICADO) ---
 // =================================================================================
-// ARQUITECTO: Reemplaza tu endpoint existente con esta versión corregida.
+// ARQUITECTO: Endpoint /api/cerbot/message con validación de estado del Cerbot.
 app.post("/api/cerbot/message", authenticateToken, async (req, res) => {
   const { sellerId, message, sessionId } = req.body;
   const askingUserId = req.user.id;
@@ -318,13 +318,32 @@ app.post("/api/cerbot/message", authenticateToken, async (req, res) => {
   let updatedCredit = null;
 
   try {
-      // --- INICIO DE LA LÓGICA DE CRÉDITOS CONDICIONAL ---
-      if (isTestMode) {
-          console.log(`[Cerbot] MODO PRUEBA: El dueño (ID: ${sellerId}) está probando su bot. No se aplican cargos.`);
-      } else {
-        // Lee el costo desde la variable de entorno, con un fallback.
-        const debitAmount =
-          parseFloat(process.env.COST_CERBOT_RESPONSE) || 2.00;
+    // --- INICIO DE LA SOLUCIÓN ARQUITECTÓNICA ---
+    // 1. Verificamos el estado del Cerbot del vendedor ANTES de cualquier otra acción.
+    const sellerCheckResult = await pool.query(
+      "SELECT cerbot_activo FROM usuarios WHERE id = $1",
+      [sellerId]
+    );
+
+    const isCerbotActive = sellerCheckResult.rows[0]?.cerbot_activo;
+
+    // 2. Si el Cerbot NO está activo Y NO es una prueba del dueño...
+    if (!isCerbotActive && !isTestMode) {
+      console.log(`[Cerbot] Intento de chat con Cerbot inactivo del vendedor ID: ${sellerId}. Se devuelve mensaje de fallback.`);
+      
+      // ...devolvemos el mensaje de advertencia y detenemos la ejecución.
+      // No se debitan créditos, no se llama a la IA.
+      return res.json({
+        botResponse: "Este usuario no ha configurado su Cerbot a detalle, sin embargo estoy aquí para brindarte apoyo sobre esta publicación. Lo más seguro es que lo que estás buscando se resuelva escribiéndole directamente por WhatsApp. 📲 Toca el botón verde que aparece abajo para chatear directamente con el vendedor."
+      });
+    }
+    // --- FIN DE LA SOLUCIÓN ARQUITECTÓNICA ---
+
+    // A partir de aquí, el código solo se ejecuta si el Cerbot está activo o si es una prueba del dueño.
+    if (isTestMode) {
+        console.log(`[Cerbot] MODO PRUEBA: El dueño (ID: ${sellerId}) está probando su bot. No se aplican cargos.`);
+    } else {
+        const debitAmount = parseFloat(process.env.COST_CERBOT_RESPONSE) || 2.00;
         const debitDescription = `Costo por respuesta de Cerbot (al usuario ID: ${askingUserId})`;
 
         const debitResponse = await fetch(
@@ -344,58 +363,47 @@ app.post("/api/cerbot/message", authenticateToken, async (req, res) => {
         );
 
         if (debitResponse.status === 402) {
-          console.warn(
-            `[Cerbot] Créditos insuficientes para el vendedor ID: ${sellerId}.`
-          );
-          return res
-            .status(402)
-            .json({
-              error: "El asistente no está disponible en este momento.",
-            });
+          console.warn(`[Cerbot] Créditos insuficientes para el vendedor ID: ${sellerId}.`);
+          // Devolvemos un error diferente para que el frontend pueda, si quisiera, mostrar un mensaje específico de "sin créditos".
+          return res.status(402).json({ error: "El asistente no está disponible en este momento por falta de créditos del vendedor." });
         }
         if (!debitResponse.ok) {
           const errorData = await debitResponse.json();
-          throw new Error(
-            errorData.error || "Fallo en el sistema de créditos de Go."
-          );
+          throw new Error(errorData.error || "Fallo en el sistema de créditos de Go.");
         }
 
         const debitData = await debitResponse.json();
-        updatedCredit = debitData.newBalance; // Guardamos el nuevo saldo para la respuesta.
-        console.log(
-          `[Cerbot] Débito exitoso. Vendedor ID: ${sellerId}, Nuevo Saldo: ${updatedCredit}`
-        );
-      }
-      // --- FIN DE LA LÓGICA DE CRÉDITOS CONDICIONAL ---
+        updatedCredit = debitData.newBalance;
+        console.log(`[Cerbot] Débito exitoso. Vendedor ID: ${sellerId}, Nuevo Saldo: ${updatedCredit}`);
+    }
 
-      // ARQUITECTO: La lógica de la IA ahora se ejecuta para AMBOS flujos (prueba y producción).
-      const n8nReasoningWebhook = process.env.N8N_ASSISTANT_WEBHOOK_URL;
-      if (!n8nReasoningWebhook) {
-          throw new Error("N8N_ASSISTANT_WEBHOOK_URL no está configurada.");
-      }
+    // La lógica de la IA se ejecuta para ambos flujos (prueba y producción activa).
+    const n8nReasoningWebhook = process.env.N8N_ASSISTANT_WEBHOOK_URL;
+    if (!n8nReasoningWebhook) {
+        throw new Error("N8N_ASSISTANT_WEBHOOK_URL no está configurada.");
+    }
 
-      const timeZone = "America/Caracas";
-      const currentHour = parseInt(new Date().toLocaleTimeString("en-US", { timeZone, hour12: false, hour: "2-digit" }));
-      let timeOfDay;
-      if (currentHour >= 5 && currentHour < 12) timeOfDay = "mañana";
-      else if (currentHour >= 12 && currentHour < 19) timeOfDay = "tarde";
-      else if (currentHour >= 1 && currentHour < 5) timeOfDay = "madrugada";
-      else timeOfDay = "noche";
-      const timeContext = new Date().toLocaleString("es-VE", { timeZone });
+    const timeZone = "America/Caracas";
+    const currentHour = parseInt(new Date().toLocaleTimeString("en-US", { timeZone, hour12: false, hour: "2-digit" }));
+    let timeOfDay;
+    if (currentHour >= 5 && currentHour < 12) timeOfDay = "mañana";
+    else if (currentHour >= 12 && currentHour < 19) timeOfDay = "tarde";
+    else if (currentHour >= 1 && currentHour < 5) timeOfDay = "madrugada";
+    else timeOfDay = "noche";
+    const timeContext = new Date().toLocaleString("es-VE", { timeZone });
 
-      const n8nResponse = await axios.post(n8nReasoningWebhook, {
-          sellerId: sellerId,
-          user_question: message,
-          sessionId: sessionId,
-          timeContext: timeContext,
-          timeOfDay: timeOfDay,
-      }, { timeout: 15000 });
+    const n8nResponse = await axios.post(n8nReasoningWebhook, {
+        sellerId: sellerId,
+        user_question: message,
+        sessionId: sessionId,
+        timeContext: timeContext,
+        timeOfDay: timeOfDay,
+    }, { timeout: 15000 });
 
-      // Enviamos la respuesta de la IA y el nuevo saldo (si aplica).
-      res.json({
-          botResponse: n8nResponse.data.respuesta || "No pude procesar la respuesta en este momento.",
-          updatedCredit: updatedCredit // Será `null` en modo de prueba, o el nuevo saldo en producción.
-      });
+    res.json({
+        botResponse: n8nResponse.data.respuesta || "No pude procesar la respuesta en este momento.",
+        updatedCredit: updatedCredit // Será `null` en modo de prueba, o el nuevo saldo en producción.
+    });
 
   } catch (error) {
       console.error(`[Cerbot] Error en el endpoint /message:`, error);
