@@ -529,6 +529,7 @@ app.get(
 );
 
 
+
 // ARQUITECTO: Reemplaza tu endpoint existente con esta versión completa y robusta.
 app.post("/api/promociones/enviar", authenticateToken, async (req, res) => {
   const sender = req.user; // { id, nombre }
@@ -648,6 +649,77 @@ app.post("/api/promociones/enviar", authenticateToken, async (req, res) => {
     });
   } finally {
     client.release();
+  }
+});
+
+
+// ARQUITECTO: Nuevo endpoint para orquestar la edición y el cobro de una publicación.
+app.put("/api/publicaciones/:id", authenticateToken, async (req, res) => {
+  const userId = req.user.id;
+  const postId = req.params.id;
+  const postData = req.body; // Esto contendrá { titulo, descripcion, category, tags }
+
+  // --- FASE 1: PROCESAMIENTO DEL PAGO ---
+  try {
+      const debitAmount = 100.00;
+      const debitDescription = `Costo por edición de publicación ID: ${postId}`;
+
+      // Llamamos al backend de Go para debitar los créditos del usuario que está editando.
+      const debitResponse = await fetch(`${GO_BACKEND_URL}/api/usuarios/debitar-creditos`, {
+          method: 'POST',
+          headers: {
+              'Content-Type': 'application/json',
+              'Authorization': req.headers.authorization // Reutilizamos el token del usuario.
+          },
+          body: JSON.stringify({
+              monto: debitAmount,
+              descripcion: debitDescription
+          })
+      });
+
+      // Si no hay créditos, detenemos la operación.
+      if (debitResponse.status === 402) {
+          return res.status(402).json({ error: 'Créditos insuficientes para editar la publicación.' });
+      }
+      if (!debitResponse.ok) {
+          const errorData = await debitResponse.json();
+          throw new Error(errorData.error || 'Fallo en el sistema de créditos de Go.');
+      }
+
+      console.log(`[Edición] Débito de ${debitAmount} créditos exitoso para el usuario ID: ${userId}`);
+
+  } catch (error) {
+      console.error("[Edición] Error durante el proceso de débito:", error);
+      return res.status(500).json({ error: error.message || "Error al procesar el pago de créditos." });
+  }
+  // --- FIN DE LA FASE DE PAGO ---
+
+
+  // --- FASE 2: ACTUALIZACIÓN DE LA PUBLICACIÓN (SOLO SI EL PAGO FUE EXITOSO) ---
+  try {
+      // Ahora que el pago está confirmado, le pedimos a Go que actualice los datos del post.
+      const updateResponse = await fetch(`${GO_BACKEND_URL}/api/publicaciones/${postId}`, {
+          method: 'PUT',
+          headers: {
+              'Content-Type': 'application/json',
+              'Authorization': req.headers.authorization // Go usa este token de nuevo para verificar que el usuario es el dueño.
+          },
+          body: JSON.stringify(postData) // Enviamos solo los datos de texto.
+      });
+
+      if (!updateResponse.ok) {
+          const errorData = await updateResponse.json();
+          // NOTA IMPORTANTE: En este punto el crédito ya fue debitado.
+          // Un error aquí es crítico y debe ser monitoreado.
+          throw new Error(errorData.error || 'El pago fue exitoso, pero la actualización de la publicación falló.');
+      }
+
+      const updateData = await updateResponse.json();
+      res.status(200).json(updateData);
+
+  } catch (error) {
+      console.error("[Edición] Error durante la fase de actualización post-pago:", error);
+      res.status(500).json({ error: error.message });
   }
 });
 
