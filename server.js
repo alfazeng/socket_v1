@@ -416,6 +416,7 @@ app.post("/api/cerbot/message", authenticateToken, async (req, res) => {
   }
 });
 
+// ARQUITECTO: Reemplaza tu endpoint POST existente con esta versión robusta.
 app.post("/api/cerbot/knowledge", authenticateToken, async (req, res) => {
   const userId = req.user.id;
   const { categoria, pregunta, respuesta } = req.body;
@@ -424,49 +425,65 @@ app.post("/api/cerbot/knowledge", authenticateToken, async (req, res) => {
     return res.status(400).json({ error: "Todos los campos son requeridos." });
   }
 
+  // --- INICIO DE LA SOLUCIÓN: CONSULTA UPSERT ---
+  // Esta consulta intenta insertar. Si encuentra un conflicto en la combinación
+  // de (user_id, pregunta), en lugar de fallar, ejecuta una actualización.
+  const upsertQuery = `
+    INSERT INTO cerbot_conocimiento (user_id, categoria, pregunta, respuesta)
+    VALUES ($1, $2, $3, $4)
+    ON CONFLICT (user_id, pregunta)
+    DO UPDATE SET
+      respuesta = EXCLUDED.respuesta,
+      categoria = EXCLUDED.categoria,
+      updated_at = NOW()
+    RETURNING *;
+  `;
+  // --- FIN DE LA SOLUCIÓN ---
+
   const client = await pool.connect();
   try {
     await client.query("BEGIN");
 
-    const newKnowledgeQuery =
-      "INSERT INTO cerbot_conocimiento (user_id, categoria, pregunta, respuesta) VALUES ($1, $2, $3, $4) RETURNING *";
-    const newKnowledgeResult = await client.query(newKnowledgeQuery, [
-      userId,
-      categoria,
-      pregunta,
-      respuesta,
-    ]);
+    const result = await client.query(upsertQuery, [userId, categoria, pregunta, respuesta]);
 
+    // Independientemente de si fue un insert o un update, activamos el cerbot.
     const updateUserQuery =
       "UPDATE usuarios SET cerbot_activo = true, cerbot_entrenamiento_completo = true WHERE id = $1";
     await client.query(updateUserQuery, [userId]);
 
     await client.query("COMMIT");
+    
+    // Devolvemos el registro guardado (ya sea nuevo o actualizado).
+    res.status(200).json(result.rows[0]);
 
-    const insertedKnowledge = newKnowledgeResult.rows[0];
-    const responsePayload = {
-      id: insertedKnowledge.id,
-      user_id: insertedKnowledge.user_id,
-      categoria: insertedKnowledge.categoria,
-      pregunta: insertedKnowledge.pregunta,
-      respuesta: insertedKnowledge.respuesta,
-    };
-
-    res.status(201).json(responsePayload);
   } catch (error) {
     await client.query("ROLLBACK");
-    console.error("Error al guardar conocimiento y activar el Cerbot:", error);
-    res.status(500).json({ error: "Error interno del servidor." });
+    console.error("Error al guardar/actualizar conocimiento del Cerbot:", error);
+    res.status(500).json({ error: "Error interno del servidor al guardar el conocimiento." });
   } finally {
     client.release();
   }
 });
 
-app.delete(
-  "/api/cerbot/knowledge/:id",
-  authenticateToken,
-  async (req, res) => {
-    const userId = req.user.id;
+// ARQUITECTO: Añade este nuevo endpoint para solucionar el error 404.
+app.get("/api/cerbot/knowledge", authenticateToken, async (req, res) => {
+  const userId = req.user.id;
+  
+  try {
+    const result = await pool.query(
+      "SELECT * FROM cerbot_conocimiento WHERE user_id = $1 ORDER BY id", 
+      [userId]
+    );
+    res.status(200).json(result.rows);
+  } catch (error) {
+    console.error("Error al cargar el conocimiento del Cerbot:", error);
+    res.status(500).json({ error: "Error interno al cargar el conocimiento." });
+  }
+});
+
+app.delete("/api/cerbot/knowledge/:id", authenticateToken, async (req, res) => {
+    
+  const userId = req.user.id;
     const { id } = req.params;
     try {
       const deleteResult = await pool.query(
