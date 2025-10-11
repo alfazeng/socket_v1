@@ -118,17 +118,21 @@ app.get("/", (req, res) => {
 app.get("/api/conversations", authenticateToken, async (req, res) => {
   const currentUserID = req.user.id;
   try {
-    // Esta consulta es compleja pero eficiente. Obtiene todas las conversaciones del usuario,
-    // los detalles del otro participante y el último mensaje de cada una.
     const query = `
       SELECT
         c.id AS conversation_id,
-        json_agg(json_build_object('user_id', p.user_id, 'username', u.nombre, 'profileImage', u.url_imagen_perfil)) AS participants,
+        json_agg(
+          json_build_object(
+            'user_id', p.user_id,
+            'username', u.nombre,
+            'profileImage', u.url_imagen_perfil
+          )
+        ) AS participants,
         (
-          SELECT json_build_object('content', m.content, 'timestamp', m.created_at)
+          SELECT json_build_object('content', m.content, 'timestamp', m.timestamp)
           FROM messages m
           WHERE m.conversation_id = c.id
-          ORDER BY m.created_at DESC
+          ORDER BY m.timestamp DESC
           LIMIT 1
         ) AS last_message
       FROM conversations c
@@ -136,7 +140,7 @@ app.get("/api/conversations", authenticateToken, async (req, res) => {
       JOIN usuarios u ON p.user_id = u.id
       WHERE c.id IN (SELECT conversation_id FROM conversation_participants WHERE user_id = $1)
       GROUP BY c.id
-      ORDER BY (SELECT MAX(created_at) FROM messages WHERE conversation_id = c.id) DESC NULLS LAST;
+      ORDER BY (SELECT MAX(timestamp) FROM messages WHERE conversation_id = c.id) DESC NULLS LAST;
     `;
     const result = await pool.query(query, [currentUserID]);
     res.json(result.rows);
@@ -153,7 +157,6 @@ app.get(
     const currentUserID = req.user.id;
     const conversationId = req.params.id;
     try {
-      // Verificación de seguridad: Asegurarse de que el usuario es parte de la conversación
       const checkAccess = await pool.query(
         "SELECT 1 FROM conversation_participants WHERE conversation_id = $1 AND user_id = $2",
         [conversationId, currentUserID]
@@ -166,7 +169,7 @@ app.get(
       }
 
       const messages = await pool.query(
-        'SELECT id, from_user_id, content, created_at AS "timestamp" FROM messages WHERE conversation_id = $1 ORDER BY created_at ASC',
+        "SELECT id, from_user_id, content, timestamp FROM messages WHERE conversation_id = $1 ORDER BY timestamp ASC",
         [conversationId]
       );
       res.json(messages.rows);
@@ -179,7 +182,6 @@ app.get(
     }
   }
 );
-
 
 
 app.post("/api/subscribe-fcm", authenticateToken, async (req, res) => {
