@@ -151,60 +151,52 @@ app.get("/api/conversations", authenticateToken, async (req, res) => {
 });
 
 
-app.post(
-  "/api/conversations/find-or-create",
-  authenticateToken,
-  async (req, res) => {
-    const currentUserID = req.user.id;
-    const { otherUserID } = req.body;
+// ARQUITECTO: Se ha reemplazado la consulta de búsqueda por una más eficiente.
+app.post("/api/conversations/find-or-create", authenticateToken, async (req, res) => {
+  const currentUserID = req.user.id;
+  const { otherUserID } = req.body;
 
-    if (!otherUserID || currentUserID === otherUserID) {
-      return res.status(400).json({ error: "ID de usuario inválido." });
-    }
-
-    const client = await pool.connect();
-    try {
-      await client.query("BEGIN");
-
-      // Busca una conversación que tenga exactamente a estos dos participantes.
-      const findQuery = `
-      SELECT conversation_id
-      FROM conversation_participants
-      WHERE conversation_id IN (SELECT conversation_id FROM conversation_participants WHERE user_id = $1)
-        AND user_id = $2
-    `;
-      const findResult = await client.query(findQuery, [
-        currentUserID,
-        otherUserID,
-      ]);
-
-      let conversationId;
-
-      if (findResult.rows.length > 0) {
-        conversationId = findResult.rows[0].conversation_id;
-      } else {
-        const createConvResult = await client.query(
-          "INSERT INTO conversations DEFAULT VALUES RETURNING id"
-        );
-        conversationId = createConvResult.rows[0].id;
-
-        await client.query(
-          "INSERT INTO conversation_participants (conversation_id, user_id) VALUES ($1, $2), ($1, $3)",
-          [conversationId, currentUserID, otherUserID]
-        );
-      }
-
-      await client.query("COMMIT");
-      res.status(200).json({ conversationId });
-    } catch (error) {
-      await client.query("ROLLBACK");
-      console.error("Error en /api/conversations/find-or-create:", error);
-      res.status(500).json({ error: "Error al procesar la conversación." });
-    } finally {
-      client.release();
-    }
+  if (!otherUserID || currentUserID === otherUserID) {
+    return res.status(400).json({ error: "ID de usuario inválido." });
   }
-);
+
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+
+    // SOLUCIÓN: Consulta optimizada para encontrar la conversación.
+    const findQuery = `
+      SELECT conversation_id FROM conversation_participants
+      WHERE user_id IN ($1, $2)
+      GROUP BY conversation_id
+      HAVING COUNT(DISTINCT user_id) = 2;
+    `;
+    const findResult = await client.query(findQuery, [currentUserID, otherUserID]);
+
+    let conversationId;
+
+    if (findResult.rows.length > 0) {
+      conversationId = findResult.rows[0].conversation_id;
+    } else {
+      const createConvResult = await client.query("INSERT INTO conversations DEFAULT VALUES RETURNING id");
+      conversationId = createConvResult.rows[0].id;
+      await client.query(
+        "INSERT INTO conversation_participants (conversation_id, user_id) VALUES ($1, $2), ($1, $3)",
+        [conversationId, currentUserID, otherUserID]
+      );
+    }
+
+    await client.query("COMMIT");
+    res.status(200).json({ conversationId });
+  } catch (error) {
+    await client.query("ROLLBACK");
+    console.error("Error en /api/conversations/find-or-create:", error);
+    res.status(500).json({ error: "Error al procesar la conversación." });
+  } finally {
+    client.release();
+  }
+});
+
 
 app.get(
   "/api/conversations/:id/messages",
