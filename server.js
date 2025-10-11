@@ -115,69 +115,71 @@ app.get("/", (req, res) => {
 
 // --- ARQUITECTO: INICIO DE LA NUEVA IMPLEMENTACIÓN ---
 // Endpoint para encontrar o crear una conversación entre el usuario actual y otro usuario.
-app.post('/api/conversations/find-or-create', authenticateToken, async (req, res) => {
-  // El ID del usuario actual (quien inicia el chat) lo obtenemos del middleware.
-  const currentUserID = req.user.id; 
-  const { otherUserID } = req.body;
-
-  if (!otherUserID) {
-    return res.status(400).json({ error: 'El ID del otro usuario es requerido.' });
-  }
-
-  // No permitimos que un usuario cree un chat consigo mismo.
-  if (currentUserID === otherUserID) {
-    return res.status(400).json({ error: 'No se puede iniciar un chat con uno mismo.' });
-  }
-
-  const client = await pool.connect();
+app.get("/api/conversations", authenticateToken, async (req, res) => {
+  const currentUserID = req.user.id;
   try {
-    // Iniciamos una transacción para garantizar la atomicidad de la operación.
-    await client.query('BEGIN');
-
-    // 1. Buscamos una conversación existente que involucre a AMBOS usuarios.
-    const findQuery = `
-      SELECT conversation_id
-      FROM conversation_participants
-      WHERE user_id = ANY($1)
-      GROUP BY conversation_id
-      HAVING COUNT(DISTINCT user_id) = 2;
+    // Esta consulta es compleja pero eficiente. Obtiene todas las conversaciones del usuario,
+    // los detalles del otro participante y el último mensaje de cada una.
+    const query = `
+      SELECT
+        c.id AS conversation_id,
+        json_agg(json_build_object('user_id', p.user_id, 'username', u.nombre, 'profileImage', u.url_imagen_perfil)) AS participants,
+        (
+          SELECT json_build_object('content', m.content, 'timestamp', m.created_at)
+          FROM messages m
+          WHERE m.conversation_id = c.id
+          ORDER BY m.created_at DESC
+          LIMIT 1
+        ) AS last_message
+      FROM conversations c
+      JOIN conversation_participants p ON c.id = p.conversation_id
+      JOIN usuarios u ON p.user_id = u.id
+      WHERE c.id IN (SELECT conversation_id FROM conversation_participants WHERE user_id = $1)
+      GROUP BY c.id
+      ORDER BY (SELECT MAX(created_at) FROM messages WHERE conversation_id = c.id) DESC NULLS LAST;
     `;
-    const findResult = await client.query(findQuery, [[currentUserID, otherUserID]]);
-    
-    let conversationId;
-
-    if (findResult.rows.length > 0) {
-      // Si la conversación ya existe, usamos su ID.
-      conversationId = findResult.rows[0].conversation_id;
-      console.log(`[Chat] Conversación encontrada entre ${currentUserID} y ${otherUserID}. ID: ${conversationId}`);
-    } else {
-      // 2. Si no existe, la creamos.
-      console.log(`[Chat] No se encontró conversación. Creando una nueva entre ${currentUserID} y ${otherUserID}.`);
-      const createConvResult = await client.query('INSERT INTO conversations DEFAULT VALUES RETURNING id');
-      conversationId = createConvResult.rows[0].id;
-
-      // 3. Añadimos a ambos usuarios como participantes en la nueva conversación.
-      await client.query(
-        'INSERT INTO conversation_participants (conversation_id, user_id) VALUES ($1, $2), ($1, $3)',
-        [conversationId, currentUserID, otherUserID]
-      );
-    }
-    
-    // Si todo salió bien, confirmamos los cambios en la base de datos.
-    await client.query('COMMIT');
-    res.status(200).json({ conversationId });
-
+    const result = await pool.query(query, [currentUserID]);
+    res.json(result.rows);
   } catch (error) {
-    // Si algo falla, revertimos todos los cambios.
-    await client.query('ROLLBACK');
-    console.error('Error en /api/conversations/find-or-create:', error);
-    res.status(500).json({ error: 'Error al procesar la conversación.' });
-  } finally {
-    // Liberamos la conexión a la base de datos.
-    client.release();
+    console.error("Error al obtener conversaciones:", error);
+    res.status(500).json({ error: "Error interno del servidor." });
   }
 });
-// --- ARQUITECTO: FIN DE LA NUEVA IMPLEMENTACIÓN ---
+
+app.get(
+  "/api/conversations/:id/messages",
+  authenticateToken,
+  async (req, res) => {
+    const currentUserID = req.user.id;
+    const conversationId = req.params.id;
+    try {
+      // Verificación de seguridad: Asegurarse de que el usuario es parte de la conversación
+      const checkAccess = await pool.query(
+        "SELECT 1 FROM conversation_participants WHERE conversation_id = $1 AND user_id = $2",
+        [conversationId, currentUserID]
+      );
+
+      if (checkAccess.rowCount === 0) {
+        return res
+          .status(403)
+          .json({ error: "No tienes acceso a esta conversación." });
+      }
+
+      const messages = await pool.query(
+        'SELECT id, from_user_id, content, created_at AS "timestamp" FROM messages WHERE conversation_id = $1 ORDER BY created_at ASC',
+        [conversationId]
+      );
+      res.json(messages.rows);
+    } catch (error) {
+      console.error(
+        `Error al obtener mensajes para la conversación ${conversationId}:`,
+        error
+      );
+      res.status(500).json({ error: "Error interno del servidor." });
+    }
+  }
+);
+
 
 
 app.post("/api/subscribe-fcm", authenticateToken, async (req, res) => {
@@ -931,6 +933,9 @@ app.delete("/api/notifications/:id", authenticateToken, async (req, res) => {
 const server = http.createServer(app);
 const wss = new WebSocket.Server({ server });
 
+// Mapa para rastrear conexiones por userId
+const clients = new Map();
+
 wss.on("connection", (ws) => {
   ws.isAlive = true;
   ws.on("pong", () => (ws.isAlive = true));
@@ -941,21 +946,114 @@ wss.on("connection", (ws) => {
     try {
       msg = JSON.parse(msgRaw);
     } catch (err) {
-      ws.send(JSON.stringify({ type: "error", msg: "Formato de mensaje inválido." }));
+      ws.send(
+        JSON.stringify({ type: "error", msg: "Formato de mensaje inválido." })
+      );
       return;
     }
 
-    if (msg.type === "identificacion" && msg.userId) {
-      ws.userId = msg.userId; // Almacenamos el ID del usuario en la conexión del socket
-      console.log(`✅ Usuario ${ws.userId} (${msg.fullName}) identificado.`);
-      ws.send(JSON.stringify({ type: "identificado", msg: "Conexión lista." }));
-    } else {
-      ws.send(JSON.stringify({ type: "error", msg: "Tipo de mensaje no reconocido." }));
+    switch (msg.type) {
+      case "identificacion":
+        if (msg.userId) {
+          ws.userId = msg.userId;
+          clients.set(ws.userId, ws); // Almacenamos la conexión
+          console.log(
+            `✅ Usuario ${ws.userId} (${msg.fullName}) identificado.`
+          );
+          ws.send(
+            JSON.stringify({ type: "identificado", msg: "Conexión lista." })
+          );
+        }
+        break;
+
+      // --- ARQUITECTO: INICIO DE LA LÓGICA DE MANEJO DE MENSAJES DE CHAT ---
+      case "chat_message":
+        try {
+          const { conversation_id, recipient_id, content } = msg.payload;
+          const senderId = ws.userId;
+
+          // Guardar mensaje en la base de datos
+          const insertResult = await pool.query(
+            "INSERT INTO messages (conversation_id, from_user_id, to_user_id, content) VALUES ($1, $2, $3, $4) RETURNING *",
+            [conversation_id, senderId, recipient_id, content]
+          );
+          const newMessage = insertResult.rows[0];
+
+          // Reenviar el mensaje al destinatario si está conectado
+          const recipientSocket = clients.get(String(recipient_id));
+          if (
+            recipientSocket &&
+            recipientSocket.readyState === WebSocket.OPEN
+          ) {
+            recipientSocket.send(
+              JSON.stringify({
+                type: "new_chat_message",
+                payload: {
+                  ...newMessage,
+                  conversation_id: conversation_id, // Aseguramos que el ID de conversación se envíe de vuelta
+                },
+              })
+            );
+            console.log(
+              `[WS] Mensaje enviado de ${senderId} a ${recipient_id}`
+            );
+          } else {
+            console.log(
+              `[WS] Destinatario ${recipient_id} no está conectado. Se enviará notificación push.`
+            );
+            // Lógica para enviar una notificación push
+            const senderResult = await pool.query(
+              "SELECT nombre FROM usuarios WHERE id = $1",
+              [senderId]
+            );
+            const senderName = senderResult.rows[0]?.nombre || "Alguien";
+
+            const tokensResult = await pool.query(
+              "SELECT token FROM fcm_tokens WHERE user_id = $1",
+              [recipient_id]
+            );
+            const tokens = tokensResult.rows.map((row) => row.token);
+
+            if (tokens.length > 0) {
+              const messagePayload = {
+                data: {
+                  title: `Nuevo mensaje de ${senderName}`,
+                  body: content,
+                  url: `https://chatcerex.com/chat/${conversation_id}`, // URL para abrir el chat directamente
+                  icon: "https://chatcerex.com/img/icon-192.png",
+                },
+                tokens: tokens,
+              };
+              admin
+                .messaging()
+                .sendEachForMulticast(messagePayload)
+                .catch((err) =>
+                  console.error(
+                    "[FCM] Error enviando notificación de chat:",
+                    err
+                  )
+                );
+            }
+          }
+        } catch (error) {
+          console.error("[WS] Error al procesar chat_message:", error);
+        }
+        break;
+      // --- ARQUITECTO: FIN DE LA LÓGICA DE MANEJO DE MENSAJES DE CHAT ---
+
+      default:
+        ws.send(
+          JSON.stringify({
+            type: "error",
+            msg: "Tipo de mensaje no reconocido.",
+          })
+        );
     }
   });
 
   ws.on("close", () => {
     if (ws.userId) {
+      clients.delete(ws.userId); // Limpiamos la conexión del mapa
       console.log(`🔌 Usuario ${ws.userId} desconectado.`);
     }
   });
