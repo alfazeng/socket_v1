@@ -113,7 +113,71 @@ app.get("/", (req, res) => {
 });
 
 
+// --- ARQUITECTO: INICIO DE LA NUEVA IMPLEMENTACIÓN ---
+// Endpoint para encontrar o crear una conversación entre el usuario actual y otro usuario.
+app.post('/api/conversations/find-or-create', authenticateToken, async (req, res) => {
+  // El ID del usuario actual (quien inicia el chat) lo obtenemos del middleware.
+  const currentUserID = req.user.id; 
+  const { otherUserID } = req.body;
 
+  if (!otherUserID) {
+    return res.status(400).json({ error: 'El ID del otro usuario es requerido.' });
+  }
+
+  // No permitimos que un usuario cree un chat consigo mismo.
+  if (currentUserID === otherUserID) {
+    return res.status(400).json({ error: 'No se puede iniciar un chat con uno mismo.' });
+  }
+
+  const client = await pool.connect();
+  try {
+    // Iniciamos una transacción para garantizar la atomicidad de la operación.
+    await client.query('BEGIN');
+
+    // 1. Buscamos una conversación existente que involucre a AMBOS usuarios.
+    const findQuery = `
+      SELECT conversation_id
+      FROM conversation_participants
+      WHERE user_id = ANY($1)
+      GROUP BY conversation_id
+      HAVING COUNT(DISTINCT user_id) = 2;
+    `;
+    const findResult = await client.query(findQuery, [[currentUserID, otherUserID]]);
+    
+    let conversationId;
+
+    if (findResult.rows.length > 0) {
+      // Si la conversación ya existe, usamos su ID.
+      conversationId = findResult.rows[0].conversation_id;
+      console.log(`[Chat] Conversación encontrada entre ${currentUserID} y ${otherUserID}. ID: ${conversationId}`);
+    } else {
+      // 2. Si no existe, la creamos.
+      console.log(`[Chat] No se encontró conversación. Creando una nueva entre ${currentUserID} y ${otherUserID}.`);
+      const createConvResult = await client.query('INSERT INTO conversations DEFAULT VALUES RETURNING id');
+      conversationId = createConvResult.rows[0].id;
+
+      // 3. Añadimos a ambos usuarios como participantes en la nueva conversación.
+      await client.query(
+        'INSERT INTO conversation_participants (conversation_id, user_id) VALUES ($1, $2), ($1, $3)',
+        [conversationId, currentUserID, otherUserID]
+      );
+    }
+    
+    // Si todo salió bien, confirmamos los cambios en la base de datos.
+    await client.query('COMMIT');
+    res.status(200).json({ conversationId });
+
+  } catch (error) {
+    // Si algo falla, revertimos todos los cambios.
+    await client.query('ROLLBACK');
+    console.error('Error en /api/conversations/find-or-create:', error);
+    res.status(500).json({ error: 'Error al procesar la conversación.' });
+  } finally {
+    // Liberamos la conexión a la base de datos.
+    client.release();
+  }
+});
+// --- ARQUITECTO: FIN DE LA NUEVA IMPLEMENTACIÓN ---
 
 
 app.post("/api/subscribe-fcm", authenticateToken, async (req, res) => {
@@ -915,3 +979,5 @@ setInterval(() => {
 server.listen(PORT, () => {
   console.log(`🚀 Servidor WebSocket y API escuchando en el puerto: ${PORT}`);
 });
+
+
