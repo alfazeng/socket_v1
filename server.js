@@ -990,8 +990,6 @@ app.delete("/api/notifications/:id", authenticateToken, async (req, res) => {
 // =================================================================================
 const server = http.createServer(app);
 const wss = new WebSocket.Server({ server });
-
-// Mapa para rastrear conexiones por userId
 const clients = new Map();
 
 wss.on("connection", (ws) => {
@@ -1014,7 +1012,7 @@ wss.on("connection", (ws) => {
       case "identificacion":
         if (msg.userId) {
           ws.userId = msg.userId;
-          clients.set(ws.userId, ws); // Almacenamos la conexión
+          clients.set(ws.userId, ws);
           console.log(
             `✅ Usuario ${ws.userId} (${msg.fullName}) identificado.`
           );
@@ -1024,20 +1022,20 @@ wss.on("connection", (ws) => {
         }
         break;
 
-      // --- ARQUITECTO: INICIO DE LA LÓGICA DE MANEJO DE MENSAJES DE CHAT ---
+      // --- ARQUITECTO: INICIO DE LA LÓGICA FALTANTE ---
       case "chat_message":
         try {
           const { conversation_id, recipient_id, content } = msg.payload;
           const senderId = ws.userId;
 
-          // Guardar mensaje en la base de datos
+          // 1. Guardar mensaje en la base de datos
           const insertResult = await pool.query(
-            "INSERT INTO messages (conversation_id, from_user_id, to_user_id, content) VALUES ($1, $2, $3, $4) RETURNING *",
+            "INSERT INTO messages (conversation_id, from_user_id, to_user_id, content) VALUES ($1, $2, $3, $4) RETURNING id, from_user_id, content, timestamp",
             [conversation_id, senderId, recipient_id, content]
           );
           const newMessage = insertResult.rows[0];
 
-          // Reenviar el mensaje al destinatario si está conectado
+          // 2. Reenviar mensaje al destinatario si está en línea
           const recipientSocket = clients.get(String(recipient_id));
           if (
             recipientSocket &&
@@ -1046,10 +1044,7 @@ wss.on("connection", (ws) => {
             recipientSocket.send(
               JSON.stringify({
                 type: "new_chat_message",
-                payload: {
-                  ...newMessage,
-                  conversation_id: conversation_id, // Aseguramos que el ID de conversación se envíe de vuelta
-                },
+                payload: { ...newMessage, conversation_id },
               })
             );
             console.log(
@@ -1057,15 +1052,14 @@ wss.on("connection", (ws) => {
             );
           } else {
             console.log(
-              `[WS] Destinatario ${recipient_id} no está conectado. Se enviará notificación push.`
+              `[WS] Destinatario ${recipient_id} desconectado. Enviando push.`
             );
-            // Lógica para enviar una notificación push
+            // 3. Si no, enviar notificación push
             const senderResult = await pool.query(
               "SELECT nombre FROM usuarios WHERE id = $1",
               [senderId]
             );
             const senderName = senderResult.rows[0]?.nombre || "Alguien";
-
             const tokensResult = await pool.query(
               "SELECT token FROM fcm_tokens WHERE user_id = $1",
               [recipient_id]
@@ -1076,11 +1070,11 @@ wss.on("connection", (ws) => {
               const messagePayload = {
                 data: {
                   title: `Nuevo mensaje de ${senderName}`,
-                  body: content,
-                  url: `https://chatcerex.com/chat/${conversation_id}`, // URL para abrir el chat directamente
+                  body: content.substring(0, 100),
+                  url: `https://chatcerex.com/chat?conversationId=${conversation_id}`,
                   icon: "https://chatcerex.com/img/icon-192.png",
                 },
-                tokens: tokens,
+                tokens,
               };
               admin
                 .messaging()
@@ -1097,7 +1091,7 @@ wss.on("connection", (ws) => {
           console.error("[WS] Error al procesar chat_message:", error);
         }
         break;
-      // --- ARQUITECTO: FIN DE LA LÓGICA DE MANEJO DE MENSAJES DE CHAT ---
+      // --- ARQUITECTO: FIN DE LA LÓGICA FALTANTE ---
 
       default:
         ws.send(
@@ -1111,7 +1105,7 @@ wss.on("connection", (ws) => {
 
   ws.on("close", () => {
     if (ws.userId) {
-      clients.delete(ws.userId); // Limpiamos la conexión del mapa
+      clients.delete(ws.userId);
       console.log(`🔌 Usuario ${ws.userId} desconectado.`);
     }
   });
