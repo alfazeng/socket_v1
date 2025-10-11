@@ -1025,19 +1025,20 @@ wss.on("connection", (ws) => {
         break;
 
       // --- ARQUITECTO: INICIO DE LA LÓGICA FALTANTE ---
+      // --- ARQUITECTO: INICIO DE LA LÓGICA ACTUALIZADA ---
       case "chat_message":
         try {
           const { conversation_id, recipient_id, content } = msg.payload;
           const senderId = ws.userId;
 
-          // 1. Guardar mensaje en la base de datos
+          // 1. Guardar mensaje en la base de datos (sin cambios)
           const insertResult = await pool.query(
             "INSERT INTO messages (conversation_id, from_user_id, to_user_id, content) VALUES ($1, $2, $3, $4) RETURNING id, from_user_id, content, timestamp",
             [conversation_id, senderId, recipient_id, content]
           );
           const newMessage = insertResult.rows[0];
 
-          // 2. Reenviar mensaje al destinatario si está en línea
+          // 2. Reenviar mensaje al destinatario si está en línea (sin cambios)
           const recipientSocket = clients.get(String(recipient_id));
           if (
             recipientSocket &&
@@ -1053,28 +1054,36 @@ wss.on("connection", (ws) => {
               `[WS] Mensaje enviado de ${senderId} a ${recipient_id}`
             );
           } else {
+            // 3. Si no, enviar notificación push (lógica mejorada)
             console.log(
-              `[WS] Destinatario ${recipient_id} desconectado. Enviando push.`
+              `[WS] Destinatario ${recipient_id} desconectado. Buscando tokens para enviar push...`
             );
-            // 3. Si no, enviar notificación push
+
             const senderResult = await pool.query(
               "SELECT nombre FROM usuarios WHERE id = $1",
               [senderId]
             );
             const senderName = senderResult.rows[0]?.nombre || "Alguien";
+
             const tokensResult = await pool.query(
               "SELECT token FROM fcm_tokens WHERE user_id = $1",
               [recipient_id]
             );
             const tokens = tokensResult.rows.map((row) => row.token);
 
+            // --- INICIO DE LA SOLUCIÓN: LOGGING DE DIAGNÓSTICO ---
             if (tokens.length > 0) {
+              console.log(
+                `[FCM] Se encontraron ${tokens.length} token(s) para el usuario ${recipient_id}. Enviando notificación push.`
+              );
               const messagePayload = {
                 data: {
                   title: `Nuevo mensaje de ${senderName}`,
                   body: content.substring(0, 100),
                   url: `https://chatcerex.com/chat?conversationId=${conversation_id}`,
                   icon: "https://chatcerex.com/img/icon-192.png",
+                  // Se añade 'type' para consistencia con otras notificaciones
+                  type: "chat_message",
                 },
                 tokens,
               };
@@ -1087,13 +1096,19 @@ wss.on("connection", (ws) => {
                     err
                   )
                 );
+            } else {
+              // Este es el log crucial que faltaba. Ahora sabremos por qué no se envía un push.
+              console.warn(
+                `[FCM] No se encontraron tokens de notificación para el usuario offline ${recipient_id}. No se puede enviar la notificación push.`
+              );
             }
+            // --- FIN DE LA SOLUCIÓN ---
           }
         } catch (error) {
           console.error("[WS] Error al procesar chat_message:", error);
         }
         break;
-      // --- ARQUITECTO: FIN DE LA LÓGICA FALTANTE ---
+      // --- ARQUITECTO: FIN DE LA LÓGICA ACTUALIZADA ---
 
       default:
         ws.send(
