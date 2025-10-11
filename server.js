@@ -114,19 +114,32 @@ app.get("/", (req, res) => {
 
 
 // --- ARQUITECTO: INICIO DE LA NUEVA IMPLEMENTACIÓN ---
-// Endpoint para encontrar o crear una conversación entre el usuario actual y otro usuario.
+// En: server.js
+// REEMPLAZA tu endpoint /api/conversations con este.
+
 app.get("/api/conversations", authenticateToken, async (req, res) => {
   const currentUserID = req.user.id;
   try {
+    // ANÁLISIS ARQUITECTÓNICO:
+    // Esta consulta ha sido rediseñada para ser el motor del sistema de notificaciones.
+    // 1. LEFT JOIN en `messages`: Asegura que las conversaciones sin mensajes también se listen.
+    // 2. COUNT(...) FILTER (...): Es la clave. Cuenta eficientemente solo los mensajes
+    //    donde el destinatario es el usuario actual Y `read_at` es NULL.
+    //    Este es el `unread_count` que el frontend necesita.
     const query = `
       SELECT
         c.id AS conversation_id,
-        json_agg(
-          json_build_object(
-            'user_id', p.user_id,
-            'username', u.nombre,
-            'profileImage', u.url_imagen_perfil
+        (
+          SELECT json_agg(
+            json_build_object(
+              'user_id', p_user.id,
+              'username', p_user.nombre,
+              'profileImage', p_user.url_imagen_perfil
+            )
           )
+          FROM conversation_participants cp
+          JOIN usuarios p_user ON cp.user_id = p_user.id
+          WHERE cp.conversation_id = c.id
         ) AS participants,
         (
           SELECT json_build_object('content', m.content, 'timestamp', m.timestamp)
@@ -134,13 +147,14 @@ app.get("/api/conversations", authenticateToken, async (req, res) => {
           WHERE m.conversation_id = c.id
           ORDER BY m.timestamp DESC
           LIMIT 1
-        ) AS last_message
+        ) AS last_message,
+        COUNT(m.id) FILTER (WHERE m.to_user_id = $1 AND m.read_at IS NULL) AS unread_count
       FROM conversations c
       JOIN conversation_participants p ON c.id = p.conversation_id
-      JOIN usuarios u ON p.user_id = u.id
-      WHERE c.id IN (SELECT conversation_id FROM conversation_participants WHERE user_id = $1)
+      LEFT JOIN messages m ON c.id = m.conversation_id
+      WHERE p.user_id = $1
       GROUP BY c.id
-      ORDER BY (SELECT MAX(timestamp) FROM messages WHERE conversation_id = c.id) DESC NULLS LAST;
+      ORDER BY MAX(m.timestamp) DESC NULLS LAST;
     `;
     const result = await pool.query(query, [currentUserID]);
     res.json(result.rows);
@@ -150,6 +164,25 @@ app.get("/api/conversations", authenticateToken, async (req, res) => {
   }
 });
 
+// En: server.js
+// AÑADE este nuevo endpoint, preferiblemente cerca de los otros de conversaciones.
+
+app.put("/api/conversations/:id/mark-read", authenticateToken, async (req, res) => {
+  const currentUserID = req.user.id;
+  const conversationId = req.params.id;
+  try {
+    // Este endpoint marca todos los mensajes no leídos dirigidos al usuario actual
+    // dentro de una conversación específica como leídos.
+    await pool.query(
+      "UPDATE messages SET read_at = NOW() WHERE conversation_id = $1 AND to_user_id = $2 AND read_at IS NULL",
+      [conversationId, currentUserID]
+    );
+    res.sendStatus(204); // No Content - Éxito sin devolver datos.
+  } catch (error) {
+    console.error("Error al marcar mensajes como leídos:", error);
+    res.status(500).json({ error: "Error interno del servidor." });
+  }
+});
 
 // ARQUITECTO: Se ha reemplazado la consulta de búsqueda por una más eficiente.
 app.post("/api/conversations/find-or-create", authenticateToken, async (req, res) => {
