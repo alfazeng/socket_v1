@@ -385,7 +385,10 @@ app.get("/api/notifications/unread", authenticateToken, async (req, res) => {
 const userId = req.user.id;
 try {
   const unreadNotifications = await pool.query(
-    "SELECT id, titulo, cuerpo, url, imagen, leida, fecha_creacion FROM notificaciones WHERE user_id = $1 AND leida = FALSE ORDER BY fecha_creacion DESC",
+    `SELECT id, titulo, cuerpo, url, imagen, leida, fecha_creacion, type, sender_id 
+     FROM notificaciones 
+     WHERE user_id = $1 AND leida = FALSE 
+     ORDER BY fecha_creacion DESC`,
     [userId]
   );
   res.json(unreadNotifications.rows);
@@ -777,24 +780,27 @@ app.post("/api/promociones/enviar", authenticateToken, async (req, res) => {
     ) {
       await client.query("ROLLBACK");
       // Nota: El crédito ya fue debitado. Este es un caso de error que debe ser monitoreado.
-      return res
-        .status(403)
-        .json({
-          error:
-            "Pago procesado, pero no tienes permiso para esta publicación.",
-        });
+      return res.status(403).json({
+        error: "Pago procesado, pero no tienes permiso para esta publicación.",
+      });
     }
 
     // Guardar historial de notificaciones
+    // 1. Modificamos la consulta para incluir los nuevos campos: 'type' y 'sender_id'.
     const notificationTitle = `📢 Nueva promoción de ${sender.nombre}`;
     const notificationUrl = `/publicacion/${publicationId}`;
-    const insertQuery = `INSERT INTO notificaciones (user_id, titulo, cuerpo, url) VALUES ($1, $2, $3, $4)`;
+    const insertQuery = `
+        INSERT INTO notificaciones (user_id, titulo, cuerpo, url, type, sender_id) 
+        VALUES ($1, $2, $3, $4, 'promocion', $5)
+    `;
     for (const userId of recipientIds) {
+      // 2. Pasamos el ID del remitente (sender.id) como el quinto parámetro.
       await client.query(insertQuery, [
         userId,
         notificationTitle,
         message,
         notificationUrl,
+        sender.id, // <-- ID del remitente añadido aquí
       ]);
     }
 
@@ -831,16 +837,19 @@ app.post("/api/promociones/enviar", authenticateToken, async (req, res) => {
       );
       const tokens = tokensResult.rows.map((row) => row.token);
       if (tokens.length > 0) {
+        // 3. Enriquecemos el payload de datos de FCM con 'type' y 'senderId'.
         const messagePayload = {
           data: {
             title: notificationTitle,
             body: message,
             url: `https://chatcerex.com${notificationUrl}`,
             icon: "https://chatcerex.com/img/icon-192.png",
+            type: "promocion", // <-- Campo 'type' añadido
+            senderId: String(sender.id), // <-- Campo 'senderId' añadido (como string)
           },
           tokens: tokens,
         };
-        // Se envía de forma asíncrona, no bloqueamos la respuesta.
+        // El envío asíncrono no cambia.
         admin
           .messaging()
           .sendEachForMulticast(messagePayload)
@@ -849,6 +858,7 @@ app.post("/api/promociones/enviar", authenticateToken, async (req, res) => {
           );
       }
     }
+    // --- FIN DE LA SOLUCIÓN ---
 
     await client.query("COMMIT");
 
