@@ -791,7 +791,7 @@ app.get(
   }
 );
 
-// ... (Aquí continúan tus otros endpoints, como /api/promociones/enviar)
+// ... (Aquí continúan tus otros endpoints, como /api/promociones/enviar)promociones/enviar
 // Endpoint 1: Obtener la lista de usuarios interesados en una publicación
 // ARQUITECTO: Endpoint de EDICIÓN completamente reescrito para actuar como un proxy robusto y transaccional.
 app.put("/api/publicaciones/:id",
@@ -858,6 +858,8 @@ app.put("/api/publicaciones/:id",
 );
 
 // ARQUITECTO: Reemplaza tu endpoint existente con esta versión completa y robusta.
+// En tu server.js, reemplaza por completo el endpoint /api/promociones/enviar
+
 app.post("/api/promociones/enviar", authenticateToken, async (req, res) => {
   const sender = req.user; // { id, nombre }
   const { message, publicationId, recipientIds } = req.body;
@@ -912,7 +914,7 @@ app.post("/api/promociones/enviar", authenticateToken, async (req, res) => {
     console.error("[Promociones] Error durante el proceso de débito:", error);
     return res
       .status(500)
-      .json({ error: error.message || "Error al procesar el pago." });
+      .json({ error: error.message || "Error al procesar el pago de créditos." });
   }
 
   // --- FASE 2: ENTREGA DEL SERVICIO ---
@@ -958,7 +960,10 @@ app.post("/api/promociones/enviar", authenticateToken, async (req, res) => {
 
       // 2. Comprobamos si el usuario está conectado.
       const recipientSocket = clients.get(String(userId));
-      if (recipientSocket && recipientSocket.readyState === WebSocket.OPEN) {
+      if (
+        recipientSocket &&
+        recipientSocket.readyState === WebSocket.OPEN
+      ) {
         // 3. Si está conectado, le enviamos el payload COMPLETO con el tipo correcto.
         recipientSocket.send(
           JSON.stringify({
@@ -982,17 +987,23 @@ app.post("/api/promociones/enviar", authenticateToken, async (req, res) => {
       );
       const tokens = tokensResult.rows.map((row) => row.token);
       if (tokens.length > 0) {
+        
+        // --- INICIO DE LA SOLUCIÓN ARQUITECTÓNICA PARA PUSH ---
         const messagePayload = {
-          data: {
-            title: notificationTitle,
-            body: message.substring(0, 100),
-            url: `https://chatcerex.com${notificationUrl}`,
-            icon: "https://chatcerex.com/img/icon-192.png",
-            type: "promocion",
-            senderId: String(sender.id),
-          },
-          tokens: tokens,
+            tokens: tokens,
+            notification: {
+                title: notificationTitle,
+                body: message.substring(0, 100),
+            },
+            data: {
+                url: `https://chatcerex.com${notificationUrl}`,
+                icon: "https://chatcerex.com/img/icon-192_v2.png",
+                type: "promocion",
+                senderId: String(sender.id),
+            },
         };
+        // --- FIN DE LA SOLUCIÓN ARQUITECTÓNICA PARA PUSH ---
+
         admin
           .messaging()
           .sendEachForMulticast(messagePayload)
