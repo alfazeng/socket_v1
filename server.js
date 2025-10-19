@@ -859,180 +859,127 @@ app.put("/api/publicaciones/:id",
 
 // ARQUITECTO: Reemplaza tu endpoint existente con esta versión completa y robusta.
 // En tu server.js, reemplaza por completo el endpoint /api/promociones/enviar
-
+// ARQUITECTO: Reemplaza tu endpoint existente con esta versión completa y robusta.
 app.post("/api/promociones/enviar", authenticateToken, async (req, res) => {
   const sender = req.user; // { id, nombre }
   const { message, publicationId, recipientIds } = req.body;
 
-  if (
-    !message ||
-    !publicationId ||
-    !Array.isArray(recipientIds) ||
-    recipientIds.length === 0
-  ) {
-    return res
-      .status(400)
-      .json({ error: "Faltan datos para enviar la promoción." });
+  if (!message || !publicationId || !Array.isArray(recipientIds) || recipientIds.length === 0) {
+      return res.status(400).json({ error: "Faltan datos para enviar la promoción." });
   }
 
-  // --- FASE 1: PROCESAMIENTO DEL PAGO (Sin cambios, asumimos que funciona) ---
+  // --- FASE 1: PROCESAMIENTO DEL PAGO ---
   const costPerUser = parseFloat(process.env.COST_PROMOTION_PER_USER) || 10.0;
   const costoTotal = costPerUser * recipientIds.length;
   const debitDescription = `Costo por campaña a ${recipientIds.length} usuarios (publicación ID: ${publicationId})`;
 
   try {
-    const debitResponse = await fetch(
-      `${GO_BACKEND_URL}/api/usuarios/debitar-creditos`,
-      {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: req.headers.authorization,
-        },
-        body: JSON.stringify({
-          monto: costoTotal,
-          descripcion: debitDescription,
-        }),
+      const debitResponse = await fetch(`${GO_BACKEND_URL}/api/usuarios/debitar-creditos`, {
+          method: "POST",
+          headers: {
+              "Content-Type": "application/json",
+              "Authorization": req.headers.authorization,
+          },
+          body: JSON.stringify({
+              monto: costoTotal,
+              descripcion: debitDescription,
+          }),
+      });
+
+      if (debitResponse.status === 402) {
+          return res.status(402).json({ error: "Créditos insuficientes para enviar la campaña." });
       }
-    );
-    if (debitResponse.status === 402) {
-      return res
-        .status(402)
-        .json({ error: "Créditos insuficientes para enviar la campaña." });
-    }
-    if (!debitResponse.ok) {
-      const errorData = await debitResponse.json();
-      throw new Error(
-        errorData.error || "Fallo en el sistema de créditos de Go."
-      );
-    }
-    const debitData = await debitResponse.json();
-    console.log(
-      `[Promociones] Débito exitoso. Usuario ID: ${sender.id}, Nuevo Saldo: ${debitData.newBalance}`
-    );
+      if (!debitResponse.ok) {
+          const errorData = await debitResponse.json();
+          throw new Error(errorData.error || "Fallo en el sistema de créditos de Go.");
+      }
+      const debitData = await debitResponse.json();
+      console.log(`[Promociones] Débito exitoso. Usuario ID: ${sender.id}, Nuevo Saldo: ${debitData.newBalance}`);
   } catch (error) {
-    console.error("[Promociones] Error durante el proceso de débito:", error);
-    return res
-      .status(500)
-      .json({ error: error.message || "Error al procesar el pago de créditos." });
+      console.error("[Promociones] Error durante el proceso de débito:", error);
+      return res.status(500).json({ error: error.message || "Error al procesar el pago de créditos." });
   }
 
-  // --- FASE 2: ENTREGA DEL SERVICIO ---
+  // --- FASE 2: ENTREGA DEL SERVICIO (WebSocket + FCM) ---
   const client = await pool.connect();
   try {
-    await client.query("BEGIN");
+      await client.query("BEGIN");
 
-    const publicationCheck = await client.query(
-      "SELECT usuario_id FROM publicaciones WHERE id = $1",
-      [publicationId]
-    );
-    if (
-      publicationCheck.rows.length === 0 ||
-      publicationCheck.rows[0].usuario_id !== sender.id
-    ) {
-      await client.query("ROLLBACK");
-      return res.status(403).json({
-        error: "Pago procesado, pero no tienes permiso para esta publicación.",
+      const publicationCheck = await client.query("SELECT usuario_id FROM publicaciones WHERE id = $1", [publicationId]);
+      if (publicationCheck.rows.length === 0 || publicationCheck.rows[0].usuario_id !== sender.id) {
+          await client.query("ROLLBACK");
+          return res.status(403).json({ error: "Pago procesado, pero no tienes permiso para esta publicación." });
+      }
+
+      const notificationTitle = `📢 Nueva promoción de ${sender.nombre}`;
+      const notificationUrl = `/publicacion/${publicationId}`;
+
+      const onlineUserIds = [];
+      const offlineUserIds = [];
+
+      for (const userId of recipientIds) {
+          const insertQuery = `
+              INSERT INTO notificaciones (user_id, titulo, cuerpo, url, type, sender_id)
+              VALUES ($1, $2, $3, $4, 'promocion', $5) RETURNING *;
+          `;
+          const result = await client.query(insertQuery, [userId, notificationTitle, message, notificationUrl, sender.id]);
+          const newNotification = result.rows[0];
+
+          const recipientSocket = clients.get(String(userId));
+          if (recipientSocket && recipientSocket.readyState === WebSocket.OPEN) {
+              recipientSocket.send(JSON.stringify({
+                  type: "new_notification",
+                  payload: newNotification,
+              }));
+              onlineUserIds.push(userId);
+          } else {
+              offlineUserIds.push(userId);
+          }
+      }
+
+      // Enviar notificaciones PUSH solo a los usuarios offline.
+      if (offlineUserIds.length > 0) {
+          const tokensResult = await client.query(`SELECT token FROM fcm_tokens WHERE user_id = ANY($1::int[])`, [offlineUserIds]);
+          const tokens = tokensResult.rows.map((row) => row.token);
+
+          if (tokens.length > 0) {
+              const messagePayload = {
+                  tokens: tokens,
+                  notification: {
+                      title: notificationTitle,
+                      body: message.substring(0, 100), // Acortamos el cuerpo para la push
+                  },
+                  data: {
+                      url: `https://chatcerex.com${notificationUrl}`,
+                      type: "promocion",
+                      senderId: String(sender.id),
+                  },
+              };
+              admin.messaging().sendMulticast(messagePayload)
+                  .then(response => {
+                      console.log(`[FCM] Promociones enviadas: ${response.successCount} con éxito, ${response.failureCount} fallaron.`);
+                  })
+                  .catch((err) => console.error("[FCM] Error asíncrono al enviar promociones:", err));
+          }
+      }
+
+      await client.query("COMMIT");
+
+      res.status(200).json({
+          message: "Campaña enviada y registrada con éxito.",
+          totalRecipients: recipientIds.length,
+          onlineDeliveries: onlineUserIds.length,
+          offlinePushNotifications: offlineUserIds.length,
       });
-    }
 
-    const notificationTitle = `📢 Nueva promoción de ${sender.nombre}`;
-    const notificationUrl = `/publicacion/${publicationId}`;
-    const insertQuery = `
-        INSERT INTO notificaciones (user_id, titulo, cuerpo, url, type, sender_id) 
-        VALUES ($1, $2, $3, $4, 'promocion', $5) RETURNING *;
-    `;
-
-    const onlineUserIds = [];
-    const offlineUserIds = [];
-
-    // --- INICIO DE LA SOLUCIÓN ARQUITECTÓNICA ---
-    for (const userId of recipientIds) {
-      // 1. Guardamos la notificación y OBTENEMOS el registro completo de la DB.
-      const result = await client.query(insertQuery, [
-        userId,
-        notificationTitle,
-        message,
-        notificationUrl,
-        sender.id,
-      ]);
-      const newNotification = result.rows[0];
-
-      // 2. Comprobamos si el usuario está conectado.
-      const recipientSocket = clients.get(String(userId));
-      if (
-        recipientSocket &&
-        recipientSocket.readyState === WebSocket.OPEN
-      ) {
-        // 3. Si está conectado, le enviamos el payload COMPLETO con el tipo correcto.
-        recipientSocket.send(
-          JSON.stringify({
-            type: "new_notification", // USAMOS EL TIPO CORRECTO
-            payload: newNotification,
-          })
-        );
-        onlineUserIds.push(userId);
-      } else {
-        // 4. Si no está conectado, lo añadimos a la lista para envío push.
-        offlineUserIds.push(userId);
-      }
-    }
-    // --- FIN DE LA SOLUCIÓN ARQUITECTÓNICA ---
-
-    // 5. Enviamos notificaciones PUSH solo a los usuarios offline.
-    if (offlineUserIds.length > 0) {
-      const tokensResult = await client.query(
-        `SELECT token FROM fcm_tokens WHERE user_id = ANY($1::int[])`,
-        [offlineUserIds]
-      );
-      const tokens = tokensResult.rows.map((row) => row.token);
-      if (tokens.length > 0) {
-        
-        // --- INICIO DE LA SOLUCIÓN ARQUITECTÓNICA PARA PUSH ---
-        const messagePayload = {
-            tokens: tokens,
-            notification: {
-                title: notificationTitle,
-                body: message.substring(0, 100),
-            },
-            data: {
-                url: `https://chatcerex.com${notificationUrl}`,
-                icon: "https://chatcerex.com/img/icon-192_v2.png",
-                type: "promocion",
-                senderId: String(sender.id),
-            },
-        };
-        // --- FIN DE LA SOLUCIÓN ARQUITECTÓNICA PARA PUSH ---
-
-        admin
-          .messaging()
-          .sendEachForMulticast(messagePayload)
-          .catch((err) =>
-            console.error("[FCM] Error asíncrono al enviar promociones:", err)
-          );
-      }
-    }
-
-    await client.query("COMMIT");
-
-    res.status(200).json({
-      message: "Campaña enviada y registrada con éxito.",
-      totalRecipients: recipientIds.length,
-      onlineDeliveries: onlineUserIds.length,
-      offlinePushNotifications: offlineUserIds.length,
-    });
   } catch (error) {
-    await client.query("ROLLBACK");
-    console.error("Error fatal al enviar la promoción (post-pago):", error);
-    res.status(500).json({
-      error:
-        "El pago fue procesado, pero ocurrió un error al enviar las notificaciones.",
-    });
+      await client.query("ROLLBACK");
+      console.error("Error fatal al enviar la promoción (post-pago):", error);
+      res.status(500).json({ error: "El pago fue procesado, pero ocurrió un error al enviar las notificaciones." });
   } finally {
-    client.release();
+      client.release();
   }
 });
-
 
 // ARQUITECTO: Endpoint de EDICIÓN completamente reescrito
 app.put("/api/publicaciones/:id", 
