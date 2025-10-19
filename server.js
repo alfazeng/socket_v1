@@ -1156,7 +1156,7 @@ app.use("/api", (req, res, next) => {
 });
 
 // =================================================================================
-// --- SERVIDOR WEBSOCKET (SIN CAMBIOS EN LA LÓGICA DE CONEXIÓN) ---
+// --- SERVIDOR WEBSOCKET (CON PUSH NOTIFICATIONS OPTIMIZADAS PARA CHAT) ---
 // =================================================================================
 const server = http.createServer(app);
 const wss = new WebSocket.Server({ server });
@@ -1187,92 +1187,81 @@ wss.on("connection", (ws) => {
         break;
 
       case "chat_message":
+        const client = await pool.connect();
         try {
+          await client.query("BEGIN");
+
           const { conversation_id, recipient_id, content, publicationId } =
             msg.payload;
           const senderId = ws.userId;
-          const client = await pool.connect();
-          try {
-            await client.query("BEGIN");
 
-            if (publicationId) {
-              const insertConversionQuery = `
-                INSERT INTO campaign_responses (publication_id, consumer_id, seller_id)
-                VALUES ($1, $2, $3)
-                ON CONFLICT (publication_id, consumer_id) DO NOTHING;  
-              `;
-              await client.query(insertConversionQuery, [
-                publicationId,
-                senderId,
-                recipient_id,
-              ]);
-            }
+          if (publicationId) {
+            const insertConversionQuery = `
+              INSERT INTO campaign_responses (publication_id, consumer_id, seller_id)
+              VALUES ($1, $2, $3)
+              ON CONFLICT (publication_id, consumer_id) DO NOTHING;
+            `;
+            await client.query(insertConversionQuery, [
+              publicationId,
+              senderId,
+              recipient_id,
+            ]);
+          }
 
-            const insertResult = await client.query(
-              "INSERT INTO messages (conversation_id, from_user_id, to_user_id, content) VALUES ($1, $2, $3, $4) RETURNING id, from_user_id, content, timestamp",
-              [conversation_id, senderId, recipient_id, content]
+          const insertResult = await client.query(
+            "INSERT INTO messages (conversation_id, from_user_id, to_user_id, content) VALUES ($1, $2, $3, $4) RETURNING id, from_user_id, content, timestamp",
+            [conversation_id, senderId, recipient_id, content]
+          );
+          const newMessage = insertResult.rows[0];
+          await client.query("COMMIT");
+
+          const recipientSocket = clients.get(String(recipient_id));
+          if (
+            recipientSocket &&
+            recipientSocket.readyState === WebSocket.OPEN
+          ) {
+            recipientSocket.send(
+              JSON.stringify({
+                type: "new_chat_message",
+                payload: { ...newMessage, conversation_id },
+              })
             );
-            const newMessage = insertResult.rows[0];
-            await client.query("COMMIT");
+          } else {
+            // --- INICIO DE LA SOLUCIÓN ARQUITECTÓNICA ---
+            console.log(`[WS] Usuario ${recipient_id} offline. Enviando PUSH tipo PING.`);
+            
+            const tokensResult = await pool.query(
+              "SELECT token FROM fcm_tokens WHERE user_id = $1",
+              [recipient_id]
+            );
+            const tokens = tokensResult.rows.map((row) => row.token);
 
-            const recipientSocket = clients.get(String(recipient_id));
-            if (
-              recipientSocket &&
-              recipientSocket.readyState === WebSocket.OPEN
-            ) {
-              recipientSocket.send(
-                JSON.stringify({
-                  type: "new_chat_message",
-                  payload: { ...newMessage, conversation_id },
-                })
-              );
-            } else {
-              const senderResult = await pool.query(
-                "SELECT nombre FROM usuarios WHERE id = $1",
-                [senderId]
-              );
-              const senderName = senderResult.rows[0]?.nombre || "Alguien";
-              const tokensResult = await pool.query(
-                "SELECT token FROM fcm_tokens WHERE user_id = $1",
-                [recipient_id]
-              );
-              const tokens = tokensResult.rows.map((row) => row.token);
+            if (tokens.length > 0) {
+              const messagePayload = {
+                tokens: tokens,
+                notification: {
+                  title: "Nuevo Mensaje",
+                  body: "Tienes un nuevo mensaje.",
+                },
+                data: {
+                  url: `https://chatcerex.com/chat?conversationId=${conversation_id}`,
+                  icon: "https://chatcerex.com/img/icon-192_v2.png",
+                  type: "chat_message",
+                },
+              };
 
-              if (tokens.length > 0) {
-                // --- INICIO DE LA SOLUCIÓN ARQUITECTÓNICA ---
-                const messagePayload = {
-                  tokens: tokens,
-                  notification: {
-                    title: `Nuevo mensaje de ${senderName}`,
-                    body: content.substring(0, 100),
-                  },
-                  data: {
-                    url: `https://chatcerex.com/chat?conversationId=${conversation_id}`,
-                    icon: "https://chatcerex.com/img/icon-192_v2.png",
-                    type: "chat_message",
-                  },
-                };
-                // --- FIN DE LA SOLUCIÓN ARQUITECTÓNICA ---
-
-                admin
-                  .messaging()
-                  .sendEachForMulticast(messagePayload)
-                  .catch((err) =>
-                    console.error(
-                      "[FCM] Error enviando notificación de chat:",
-                      err
-                    )
-                  );
-              }
+              const fcmResponse = await admin.messaging().sendEachForMulticast(messagePayload);
+              console.log(
+                `[FCM Chat PING] Notificaciones enviadas: ${fcmResponse.successCount} con éxito, ${fcmResponse.failureCount} fallaron.`
+              );
             }
-          } catch (error) {
-            await client.query("ROLLBACK");
-            throw error;
-          } finally {
-            client.release();
+            // --- FIN DE LA SOLUCIÓN ARQUITECTÓNICA ---
           }
         } catch (error) {
+          await client.query("ROLLBACK");
           console.error("[WS] Error al procesar chat_message:", error);
+        } finally {
+          client.release();
         }
         break;
     }
