@@ -774,7 +774,7 @@ app.put("/api/publicaciones/:id",
 );
 
 // ARQUITECTO: Reemplaza tu endpoint existente con esta versión completa y robusta.
-aapp.post("/api/promociones/enviar", authenticateToken, async (req, res) => {
+app.post("/api/promociones/enviar", authenticateToken, async (req, res) => {
   const sender = req.user; // { id, nombre }
   const { message, publicationId, recipientIds } = req.body;
 
