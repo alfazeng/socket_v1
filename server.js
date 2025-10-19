@@ -744,7 +744,54 @@ app.get("/api/cerbot/search-knowledge", async (req, res) => {
     res.status(500).json({ error: "Error interno del servidor." });
   }
 });// --- ENDPOINTS PARA EL FLUJO DE CRM (NUEVOS) ---
+// En server.js, dentro de la sección de ENDPOINTS DE API REST
 
+// --- ENDPOINTS PARA EL FLUJO DE CRM (NUEVOS) ---
+
+// SOLUCIÓN: Añade este endpoint completo.
+// Endpoint 1: Obtener la lista de usuarios interesados en una publicación
+app.get(
+  "/api/publicaciones/:id/interesados",
+  authenticateToken,
+  async (req, res) => {
+    const ownerId = req.user.id;
+    const { id: publicationId } = req.params;
+
+    try {
+      // 1. Verificar que el solicitante es el dueño de la publicación
+      const publicationCheck = await pool.query(
+        "SELECT usuario_id FROM publicaciones WHERE id = $1",
+        [publicationId]
+      );
+
+      if (publicationCheck.rows.length === 0) {
+        return res.status(404).json({ error: "Publicación no encontrada." });
+      }
+
+      if (publicationCheck.rows[0].usuario_id !== ownerId) {
+        return res
+          .status(403)
+          .json({ error: "No tienes permiso para ver esta lista." });
+      }
+
+      // 2. Obtener los usuarios únicos que preguntaron en la publicación
+      const interestedUsers = await pool.query(
+        `SELECT DISTINCT u.id, u.nombre, u.url_imagen_perfil
+         FROM usuarios u
+         JOIN registro_preguntas rp ON u.id = rp.preguntador_id
+         WHERE rp.publicacion_id = $1`,
+        [publicationId]
+      );
+
+      res.json(interestedUsers.rows);
+    } catch (error) {
+      console.error("Error al obtener la lista de interesados:", error);
+      res.status(500).json({ error: "Error interno del servidor." });
+    }
+  }
+);
+
+// ... (Aquí continúan tus otros endpoints, como /api/promociones/enviar)
 // Endpoint 1: Obtener la lista de usuarios interesados en una publicación
 // ARQUITECTO: Endpoint de EDICIÓN completamente reescrito para actuar como un proxy robusto y transaccional.
 app.put("/api/publicaciones/:id",
