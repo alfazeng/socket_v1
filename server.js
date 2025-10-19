@@ -303,11 +303,6 @@ app.post("/api/subscribe-fcm", authenticateToken, async (req, res) => {
   }
 });
 
-// --- ENDPOINTS DEL CERBOT (EXISTENTES) ---
-// **NUEVO ENDPOINT** para enviar notificaciones desde el panel de administrador
-// En tu server.js (Render)
-// VERSIÓN FINAL Y ROBUSTA PARA /api/notifications/send
-
 // --- ENDPOINT DE ENVÍO DE NOTIFICACIONES (CORREGIDO) ---
 app.post("/api/notifications/send", authenticateToken, async (req, res) => {
   try {
@@ -461,17 +456,16 @@ app.put("/api/notifications/mark-read/:id", authenticateToken, async (req, res) 
 app.post("/api/cerbot/message", authenticateToken, async (req, res) => {
   const { sellerId, message, sessionId } = req.body;
   const askingUserId = req.user.id;
-  
+
   if (!sellerId || !message || !sessionId) {
-      return res.status(400).json({ error: "Faltan sellerId, message, o sessionId." });
+    return res
+      .status(400)
+      .json({ error: "Faltan sellerId, message, o sessionId." });
   }
 
   const isTestMode = String(askingUserId) === String(sellerId);
-  let updatedCredit = null;
 
   try {
-    // --- INICIO DE LA SOLUCIÓN ARQUITECTÓNICA ---
-    // 1. Verificamos el estado del Cerbot del vendedor ANTES de cualquier otra acción.
     const sellerCheckResult = await pool.query(
       "SELECT cerbot_activo FROM usuarios WHERE id = $1",
       [sellerId]
@@ -479,64 +473,28 @@ app.post("/api/cerbot/message", authenticateToken, async (req, res) => {
 
     const isCerbotActive = sellerCheckResult.rows[0]?.cerbot_activo;
 
-    // 2. Si el Cerbot NO está activo Y NO es una prueba del dueño...
     if (!isCerbotActive && !isTestMode) {
-      console.log(`[Cerbot] Intento de chat con Cerbot inactivo del vendedor ID: ${sellerId}. Se devuelve mensaje de fallback.`);
-      
-      // ...devolvemos el mensaje de advertencia y detenemos la ejecución.
-      // No se debitan créditos, no se llama a la IA.
       return res.json({
-        botResponse: "Este usuario no ha configurado su Cerbot a detalle, sin embargo estoy aquí para brindarte apoyo sobre esta publicación. Lo más seguro es que lo que estás buscando se resuelva escribiéndole directamente por WhatsApp. 📲 Toca el botón verde que aparece abajo para chatear directamente con el vendedor."
+        botResponse:
+          "Este usuario no ha configurado su Cerbot a detalle, sin embargo estoy aquí para brindarte apoyo sobre esta publicación. Lo más seguro es que lo que estás buscando se resuelva escribiéndole directamente por WhatsApp. 📲 Toca el botón verde que aparece abajo para chatear directamente con el vendedor.",
       });
     }
-    // --- FIN DE LA SOLUCIÓN ARQUITECTÓNICA ---
 
-    // A partir de aquí, el código solo se ejecuta si el Cerbot está activo o si es una prueba del dueño.
-    if (isTestMode) {
-        console.log(`[Cerbot] MODO PRUEBA: El dueño (ID: ${sellerId}) está probando su bot. No se aplican cargos.`);
-    } else {
-        const debitAmount = parseFloat(process.env.COST_CERBOT_RESPONSE) || 2.00;
-        const debitDescription = `Costo por respuesta de Cerbot (al usuario ID: ${askingUserId})`;
-
-        const debitResponse = await fetch(
-          `${GO_BACKEND_URL}/api/usuarios/debitar-creditos`,
-          {
-            method: "POST",
-            headers: {
-              "Content-Type": "application/json",
-              Authorization: `Bearer ${INTERNAL_API_KEY}`,
-            },
-            body: JSON.stringify({
-              monto: debitAmount,
-              userID: parseInt(sellerId, 10),
-              descripcion: debitDescription,
-            }),
-          }
-        );
-
-        if (debitResponse.status === 402) {
-          console.warn(`[Cerbot] Créditos insuficientes para el vendedor ID: ${sellerId}.`);
-          // Devolvemos un error diferente para que el frontend pueda, si quisiera, mostrar un mensaje específico de "sin créditos".
-          return res.status(402).json({ error: "El asistente no está disponible en este momento por falta de créditos del vendedor." });
-        }
-        if (!debitResponse.ok) {
-          const errorData = await debitResponse.json();
-          throw new Error(errorData.error || "Fallo en el sistema de créditos de Go.");
-        }
-
-        const debitData = await debitResponse.json();
-        updatedCredit = debitData.newBalance;
-        console.log(`[Cerbot] Débito exitoso. Vendedor ID: ${sellerId}, Nuevo Saldo: ${updatedCredit}`);
-    }
-
-    // La lógica de la IA se ejecuta para ambos flujos (prueba y producción activa).
+    // --- INICIO DE LA SOLUCIÓN ARQUITECTÓNICA ---
+    // FASE 1: OBTENER LA RESPUESTA DE LA IA PRIMERO
     const n8nReasoningWebhook = process.env.N8N_ASSISTANT_WEBHOOK_URL;
     if (!n8nReasoningWebhook) {
-        throw new Error("N8N_ASSISTANT_WEBHOOK_URL no está configurada.");
+      throw new Error("N8N_ASSISTANT_WEBHOOK_URL no está configurada.");
     }
 
     const timeZone = "America/Caracas";
-    const currentHour = parseInt(new Date().toLocaleTimeString("en-US", { timeZone, hour12: false, hour: "2-digit" }));
+    const currentHour = parseInt(
+      new Date().toLocaleTimeString("en-US", {
+        timeZone,
+        hour12: false,
+        hour: "2-digit",
+      })
+    );
     let timeOfDay;
     if (currentHour >= 5 && currentHour < 12) timeOfDay = "mañana";
     else if (currentHour >= 12 && currentHour < 19) timeOfDay = "tarde";
@@ -544,27 +502,99 @@ app.post("/api/cerbot/message", authenticateToken, async (req, res) => {
     else timeOfDay = "noche";
     const timeContext = new Date().toLocaleString("es-VE", { timeZone });
 
-    const n8nResponse = await axios.post(n8nReasoningWebhook, {
+    const n8nResponse = await axios.post(
+      n8nReasoningWebhook,
+      {
         sellerId: sellerId,
         user_question: message,
         sessionId: sessionId,
         timeContext: timeContext,
         timeOfDay: timeOfDay,
-    }, { timeout: 15000 });
+      },
+      { timeout: 15000 }
+    );
+
+    const botResponse =
+      n8nResponse.data.respuesta ||
+      "No pude procesar la respuesta en este momento.";
+
+    // Si estamos en modo de prueba, devolvemos la respuesta sin cobrar.
+    if (isTestMode) {
+      console.log(
+        `[Cerbot] MODO PRUEBA: El dueño (ID: ${sellerId}) está probando su bot. No se aplican cargos.`
+      );
+      return res.json({ botResponse, updatedCredit: null });
+    }
+
+    // FASE 2: PROCESAR EL PAGO (SOLO SI LA IA RESPONDIÓ Y NO ES MODO PRUEBA)
+    const debitAmount = parseFloat(process.env.COST_CERBOT_RESPONSE) || 2.0;
+    const debitDescription = `Costo por respuesta de Cerbot (al usuario ID: ${askingUserId})`;
+
+    const debitResponse = await fetch(
+      `${GO_BACKEND_URL}/api/usuarios/debitar-creditos`,
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${INTERNAL_API_KEY}`,
+        },
+        body: JSON.stringify({
+          monto: debitAmount,
+          userID: parseInt(sellerId, 10),
+          descripcion: debitDescription,
+        }),
+      }
+    );
+
+    if (debitResponse.status === 402) {
+      console.warn(
+        `[Cerbot] Créditos insuficientes para el vendedor ID: ${sellerId}. La respuesta de la IA se envió pero no se pudo cobrar.`
+      );
+      // Aunque no se pudo cobrar, entregamos la respuesta al usuario final. Es mejor para la UX.
+      // Esto debe ser monitoreado como una pérdida para el negocio.
+      return res.json({ botResponse, updatedCredit: 0 }); // O el saldo que devuelva el error
+    }
+
+    if (!debitResponse.ok) {
+      const errorData = await debitResponse.json();
+      console.error(
+        `[Cerbot PAGO] ¡ALERTA! La respuesta de la IA se dio pero el débito falló.`,
+        errorData.error
+      );
+      return res.json({
+        botResponse,
+        warning: "Hubo un problema al procesar el costo de esta respuesta.",
+      });
+    }
+
+    const debitData = await debitResponse.json();
+    console.log(
+      `[Cerbot] Débito exitoso. Vendedor ID: ${sellerId}, Nuevo Saldo: ${debitData.newBalance}`
+    );
 
     res.json({
-        botResponse: n8nResponse.data.respuesta || "No pude procesar la respuesta en este momento.",
-        updatedCredit: updatedCredit // Será `null` en modo de prueba, o el nuevo saldo en producción.
+      botResponse: botResponse,
+      updatedCredit: debitData.newBalance,
     });
-
+    // --- FIN DE LA SOLUCIÓN ARQUITECTÓNICA ---
   } catch (error) {
-      console.error(`[Cerbot] Error en el endpoint /message:`, error);
-      if (axios.isAxiosError(error) && (error.code === "ECONNABORTED" || error.code === "ETIMEDOUT")) {
-          return res.status(504).json({ botResponse: "El asistente está tardando mucho en responder. Intenta de nuevo más tarde." });
-      }
-      if (!res.headersSent) {
-          return res.status(500).json({ error: error.message || 'Error interno del servidor.' });
-      }
+    console.error(`[Cerbot] Error en el endpoint /message:`, error);
+    if (
+      axios.isAxiosError(error) &&
+      (error.code === "ECONNABORTED" || error.code === "ETIMEDOUT")
+    ) {
+      return res
+        .status(504)
+        .json({
+          botResponse:
+            "El asistente está tardando mucho en responder. Intenta de nuevo más tarde.",
+        });
+    }
+    if (!res.headersSent) {
+      return res
+        .status(500)
+        .json({ error: error.message || "Error interno del servidor." });
+    }
   }
 });
 
@@ -679,51 +709,72 @@ app.get("/api/cerbot/search-knowledge", async (req, res) => {
 });// --- ENDPOINTS PARA EL FLUJO DE CRM (NUEVOS) ---
 
 // Endpoint 1: Obtener la lista de usuarios interesados en una publicación
-app.get(
-  "/api/publicaciones/:id/interesados",
+// ARQUITECTO: Endpoint de EDICIÓN completamente reescrito para actuar como un proxy robusto y transaccional.
+app.put("/api/publicaciones/:id",
   authenticateToken,
+  upload.any(), // Usamos upload.any() para que multer no parse el body, solo nos dé acceso a él.
   async (req, res) => {
-    const ownerId = req.user.id;
-    const { id: publicationId } = req.params;
+    const userId = req.user.id;
+    const postId = req.params.id;
+    const goBackendUrl = `${GO_BACKEND_URL}/api/publicaciones/${postId}`;
 
     try {
-      // 1. Verificar que el solicitante es el dueño de la publicación
-      const publicationCheck = await pool.query(
-        "SELECT usuario_id FROM publicaciones WHERE id = $1",
-        [publicationId]
-      );
+      // --- FASE 1: PROXY DIRECTO DEL STREAM ---
+      // En lugar de reconstruir, transmitimos la petición original directamente a Go.
+      // Esto es más rápido y elimina errores de formato multipart.
+      const proxyResponse = await fetch(goBackendUrl, {
+        method: 'PUT',
+        headers: {
+          // Reenviamos las cabeceras originales, incluyendo Content-Type con su boundary.
+          'Content-Type': req.headers['content-type'],
+          'Authorization': req.headers.authorization,
+        },
+        body: req.body // El cuerpo (buffer) es transmitido tal cual.
+      });
 
-      if (publicationCheck.rows.length === 0) {
-        return res.status(404).json({ error: "Publicación no encontrada." });
+      const responseData = await proxyResponse.json();
+
+      // Si Go falla al actualizar, detenemos todo aquí. No se cobra nada.
+      if (!proxyResponse.ok) {
+        console.error(`[Edición Proxy] Error desde el backend de Go: ${proxyResponse.status}`, responseData.error);
+        return res.status(proxyResponse.status).json({ error: responseData.error || 'El backend de Go rechazó la actualización.' });
       }
 
-      if (publicationCheck.rows[0].usuario_id !== ownerId) {
-        return res
-          .status(403)
-          .json({ error: "No tienes permiso para ver esta lista." });
+      // --- FASE 2: PROCESAMIENTO DEL PAGO (SOLO SI LA FASE 1 FUE EXITOSA) ---
+      const debitAmount = parseFloat(process.env.COST_POST_EDIT) || 100.0;
+      const debitDescription = `Costo por edición de publicación ID: ${postId}`;
+
+      const debitResponse = await fetch(`${GO_BACKEND_URL}/api/usuarios/debitar-creditos`, {
+        method: 'POST',
+        headers: {
+            'Content-Type': 'application/json',
+            'Authorization': req.headers.authorization,
+        },
+        body: JSON.stringify({ monto: debitAmount, descripcion: debitDescription })
+      });
+
+      if (!debitResponse.ok) {
+        // En este caso improbable, la edición tuvo éxito pero el débito falló.
+        // Esto debe ser monitoreado. Devolvemos la publicación actualizada pero advertimos.
+        console.error(`[Edición PAGO] ¡ALERTA! La publicación ${postId} se actualizó pero el débito falló.`);
+        return res.status(200).json({
+            ...responseData,
+            warning: 'La publicación fue actualizada, pero hubo un problema al procesar el pago.'
+        });
       }
 
-      // 2. Obtener los usuarios que preguntaron
-      const interestedUsers = await pool.query(
-        `SELECT u.id, u.nombre, u.url_imagen_perfil
-       FROM usuarios u
-       JOIN registro_preguntas rp ON u.id = rp.preguntador_id
-       WHERE rp.publicacion_id = $1`,
-        [publicationId]
-      );
+      console.log(`[Edición] Débito de ${debitAmount} exitoso para el usuario ID: ${userId}`);
+      res.status(200).json(responseData);
 
-      res.json(interestedUsers.rows);
     } catch (error) {
-      console.error("Error al obtener la lista de interesados:", error);
-      res.status(500).json({ error: "Error interno del servidor." });
+      console.error("[Edición] Error en el proxy de actualización:", error);
+      res.status(500).json({ error: "Error interno del servidor al procesar la edición." });
     }
   }
 );
 
-
-
 // ARQUITECTO: Reemplaza tu endpoint existente con esta versión completa y robusta.
-app.post("/api/promociones/enviar", authenticateToken, async (req, res) => {
+aapp.post("/api/promociones/enviar", authenticateToken, async (req, res) => {
   const sender = req.user; // { id, nombre }
   const { message, publicationId, recipientIds } = req.body;
 
@@ -738,67 +789,49 @@ app.post("/api/promociones/enviar", authenticateToken, async (req, res) => {
       .json({ error: "Faltan datos para enviar la promoción." });
   }
 
-  // --- ARQUITECTO: FASE 1 - PROCESAMIENTO DEL PAGO ---
-  // Calculamos el costo total y preparamos la descripción del débito.
-  // Lee el costo por usuario desde la variable de entorno.
+  // --- FASE 1: PROCESAMIENTO DEL PAGO (Sin cambios, asumimos que funciona) ---
   const costPerUser = parseFloat(process.env.COST_PROMOTION_PER_USER) || 10.0;
   const costoTotal = costPerUser * recipientIds.length;
   const debitDescription = `Costo por campaña a ${recipientIds.length} usuarios (publicación ID: ${publicationId})`;
 
   try {
-    // Llamamos al backend de Go para debitar los créditos ANTES de cualquier otra operación.
     const debitResponse = await fetch(
       `${GO_BACKEND_URL}/api/usuarios/debitar-creditos`,
       {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
-          Authorization: req.headers.authorization, // Reutilizamos el token del usuario que hace la petición.
+          Authorization: req.headers.authorization,
         },
         body: JSON.stringify({
           monto: costoTotal,
           descripcion: debitDescription,
-          // No se necesita 'userID' porque Go lo infiere del token del usuario.
         }),
       }
     );
-
-    // Manejamos la respuesta del sistema de créditos.
     if (debitResponse.status === 402) {
-      // 402 Payment Required
-      console.warn(
-        `[Promociones] Créditos insuficientes para el usuario ID: ${sender.id}.`
-      );
       return res
         .status(402)
         .json({ error: "Créditos insuficientes para enviar la campaña." });
     }
-
     if (!debitResponse.ok) {
       const errorData = await debitResponse.json();
       throw new Error(
         errorData.error || "Fallo en el sistema de créditos de Go."
       );
     }
-
     const debitData = await debitResponse.json();
     console.log(
       `[Promociones] Débito exitoso. Usuario ID: ${sender.id}, Nuevo Saldo: ${debitData.newBalance}`
     );
   } catch (error) {
-    console.error(
-      "[Promociones] Error fatal durante el proceso de débito:",
-      error
-    );
+    console.error("[Promociones] Error durante el proceso de débito:", error);
     return res
       .status(500)
-      .json({
-        error: error.message || "Error al procesar el pago de créditos.",
-      });
+      .json({ error: error.message || "Error al procesar el pago." });
   }
-  // --- FIN DE LA FASE DE PAGO ---
 
-  // --- ARQUITECTO: FASE 2 - ENTREGA DEL SERVICIO (SOLO SI EL PAGO FUE EXITOSO) ---
+  // --- FASE 2: ENTREGA DEL SERVICIO ---
   const client = await pool.connect();
   try {
     await client.query("BEGIN");
@@ -812,57 +845,52 @@ app.post("/api/promociones/enviar", authenticateToken, async (req, res) => {
       publicationCheck.rows[0].usuario_id !== sender.id
     ) {
       await client.query("ROLLBACK");
-      // Nota: El crédito ya fue debitado. Este es un caso de error que debe ser monitoreado.
       return res.status(403).json({
         error: "Pago procesado, pero no tienes permiso para esta publicación.",
       });
     }
 
-    // Guardar historial de notificaciones
-    // 1. Modificamos la consulta para incluir los nuevos campos: 'type' y 'sender_id'.
     const notificationTitle = `📢 Nueva promoción de ${sender.nombre}`;
     const notificationUrl = `/publicacion/${publicationId}`;
     const insertQuery = `
         INSERT INTO notificaciones (user_id, titulo, cuerpo, url, type, sender_id) 
-        VALUES ($1, $2, $3, $4, 'promocion', $5)
+        VALUES ($1, $2, $3, $4, 'promocion', $5) RETURNING *;
     `;
+
+    const onlineUserIds = [];
+    const offlineUserIds = [];
+
+    // --- INICIO DE LA SOLUCIÓN ARQUITECTÓNICA ---
     for (const userId of recipientIds) {
-      // 2. Pasamos el ID del remitente (sender.id) como el quinto parámetro.
-      await client.query(insertQuery, [
+      // 1. Guardamos la notificación y OBTENEMOS el registro completo de la DB.
+      const result = await client.query(insertQuery, [
         userId,
         notificationTitle,
         message,
         notificationUrl,
-        sender.id, // <-- ID del remitente añadido aquí
+        sender.id,
       ]);
-    }
+      const newNotification = result.rows[0];
 
-    // Lógica de entrega diferenciada (WebSocket y FCM)
-    const onlineUserIds = [];
-    wss.clients.forEach((wsClient) => {
-      const clientUserId = parseInt(wsClient.userId, 10);
-      if (
-        wsClient.readyState === WebSocket.OPEN &&
-        recipientIds.includes(clientUserId)
-      ) {
-        wsClient.send(
+      // 2. Comprobamos si el usuario está conectado.
+      const recipientSocket = clients.get(String(userId));
+      if (recipientSocket && recipientSocket.readyState === WebSocket.OPEN) {
+        // 3. Si está conectado, le enviamos el payload COMPLETO con el tipo correcto.
+        recipientSocket.send(
           JSON.stringify({
-            type: "promotional_message",
-            payload: {
-              from: sender.nombre,
-              message,
-              publicationId,
-              timestamp: new Date().toISOString(),
-            },
+            type: "new_notification", // USAMOS EL TIPO CORRECTO
+            payload: newNotification,
           })
         );
-        onlineUserIds.push(clientUserId);
+        onlineUserIds.push(userId);
+      } else {
+        // 4. Si no está conectado, lo añadimos a la lista para envío push.
+        offlineUserIds.push(userId);
       }
-    });
+    }
+    // --- FIN DE LA SOLUCIÓN ARQUITECTÓNICA ---
 
-    const offlineUserIds = recipientIds.filter(
-      (id) => !onlineUserIds.includes(id)
-    );
+    // 5. Enviamos notificaciones PUSH solo a los usuarios offline.
     if (offlineUserIds.length > 0) {
       const tokensResult = await client.query(
         `SELECT token FROM fcm_tokens WHERE user_id = ANY($1::int[])`,
@@ -870,19 +898,17 @@ app.post("/api/promociones/enviar", authenticateToken, async (req, res) => {
       );
       const tokens = tokensResult.rows.map((row) => row.token);
       if (tokens.length > 0) {
-        // 3. Enriquecemos el payload de datos de FCM con 'type' y 'senderId'.
         const messagePayload = {
           data: {
             title: notificationTitle,
-            body: message,
+            body: message.substring(0, 100),
             url: `https://chatcerex.com${notificationUrl}`,
             icon: "https://chatcerex.com/img/icon-192.png",
-            type: "promocion", // <-- Campo 'type' añadido
-            senderId: String(sender.id), // <-- Campo 'senderId' añadido (como string)
+            type: "promocion",
+            senderId: String(sender.id),
           },
           tokens: tokens,
         };
-        // El envío asíncrono no cambia.
         admin
           .messaging()
           .sendEachForMulticast(messagePayload)
@@ -891,7 +917,6 @@ app.post("/api/promociones/enviar", authenticateToken, async (req, res) => {
           );
       }
     }
-    // --- FIN DE LA SOLUCIÓN ---
 
     await client.query("COMMIT");
 
