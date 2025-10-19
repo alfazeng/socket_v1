@@ -1156,7 +1156,7 @@ app.use("/api", (req, res, next) => {
 });
 
 // =================================================================================
-// --- SERVIDOR WEBSOCKET (CON CORRECCIÓN DE PUSH NOTIFICATIONS) ---
+// --- SERVIDOR WEBSOCKET (SIN CAMBIOS EN LA LÓGICA DE CONEXIÓN) ---
 // =================================================================================
 const server = http.createServer(app);
 const wss = new WebSocket.Server({ server });
@@ -1172,7 +1172,6 @@ wss.on("connection", (ws) => {
     try {
       msg = JSON.parse(msgRaw);
     } catch (err) {
-      console.error("Error al parsear mensaje de WS:", err);
       return;
     }
 
@@ -1192,69 +1191,88 @@ wss.on("connection", (ws) => {
           const { conversation_id, recipient_id, content, publicationId } =
             msg.payload;
           const senderId = ws.userId;
-          
-          // Guardar el mensaje en la base de datos
-          const insertResult = await pool.query(
-            "INSERT INTO messages (conversation_id, from_user_id, to_user_id, content) VALUES ($1, $2, $3, $4) RETURNING id, from_user_id, content, timestamp",
-            [conversation_id, senderId, recipient_id, content]
-          );
-          const newMessage = insertResult.rows[0];
+          const client = await pool.connect();
+          try {
+            await client.query("BEGIN");
 
-          // Intentar entregar en tiempo real vía WebSocket
-          const recipientSocket = clients.get(String(recipient_id));
-          if (
-            recipientSocket &&
-            recipientSocket.readyState === WebSocket.OPEN
-          ) {
-            recipientSocket.send(
-              JSON.stringify({
-                type: "new_chat_message",
-                payload: { ...newMessage, conversation_id },
-              })
-            );
-          } else {
-            // --- INICIO DE LA SOLUCIÓN ARQUITECTÓNICA ---
-            // El usuario no está conectado, enviar notificación PUSH.
-            console.log(`[WS] Usuario ${recipient_id} offline. Intentando enviar Push Notification.`);
+            if (publicationId) {
+              const insertConversionQuery = `
+                INSERT INTO campaign_responses (publication_id, consumer_id, seller_id)
+                VALUES ($1, $2, $3)
+                ON CONFLICT (publication_id, consumer_id) DO NOTHING;  
+              `;
+              await client.query(insertConversionQuery, [
+                publicationId,
+                senderId,
+                recipient_id,
+              ]);
+            }
 
-            const senderResult = await pool.query(
-              "SELECT nombre FROM usuarios WHERE id = $1",
-              [senderId]
+            const insertResult = await client.query(
+              "INSERT INTO messages (conversation_id, from_user_id, to_user_id, content) VALUES ($1, $2, $3, $4) RETURNING id, from_user_id, content, timestamp",
+              [conversation_id, senderId, recipient_id, content]
             );
-            const senderName = senderResult.rows[0]?.nombre || "Alguien";
-            
-            const tokensResult = await pool.query(
-              "SELECT token FROM fcm_tokens WHERE user_id = $1",
-              [recipient_id]
-            );
-            const tokens = tokensResult.rows.map((row) => row.token);
+            const newMessage = insertResult.rows[0];
+            await client.query("COMMIT");
 
-            if (tokens.length > 0) {
-              const messagePayload = {
-                tokens: tokens,
-                notification: {
-                  title: `Nuevo mensaje de ${senderName}`,
-                  body: content.substring(0, 100), // Acortamos el mensaje para la notificación
-                },
-                data: {
-                  // URL que abrirá la app en la conversación correcta
-                  url: `https://chatcerex.com/chat?conversationId=${conversation_id}`,
-                  type: "chat_message",
-                },
-              };
-              
-              // Se añade 'await' para asegurar el envío y se mejora el logging.
-              const fcmResponse = await admin.messaging().sendEachForMulticast(messagePayload);
-              console.log(
-                `[FCM Chat] Notificaciones de chat enviadas: ${fcmResponse.successCount} con éxito, ${fcmResponse.failureCount} fallaron.`
+            const recipientSocket = clients.get(String(recipient_id));
+            if (
+              recipientSocket &&
+              recipientSocket.readyState === WebSocket.OPEN
+            ) {
+              recipientSocket.send(
+                JSON.stringify({
+                  type: "new_chat_message",
+                  payload: { ...newMessage, conversation_id },
+                })
               );
             } else {
-              console.log(`[WS] El usuario ${recipient_id} no tiene tokens de FCM registrados.`);
+              const senderResult = await pool.query(
+                "SELECT nombre FROM usuarios WHERE id = $1",
+                [senderId]
+              );
+              const senderName = senderResult.rows[0]?.nombre || "Alguien";
+              const tokensResult = await pool.query(
+                "SELECT token FROM fcm_tokens WHERE user_id = $1",
+                [recipient_id]
+              );
+              const tokens = tokensResult.rows.map((row) => row.token);
+
+              if (tokens.length > 0) {
+                // --- INICIO DE LA SOLUCIÓN ARQUITECTÓNICA ---
+                const messagePayload = {
+                  tokens: tokens,
+                  notification: {
+                    title: `Nuevo mensaje de ${senderName}`,
+                    body: content.substring(0, 100),
+                  },
+                  data: {
+                    url: `https://chatcerex.com/chat?conversationId=${conversation_id}`,
+                    icon: "https://chatcerex.com/img/icon-192_v2.png",
+                    type: "chat_message",
+                  },
+                };
+                // --- FIN DE LA SOLUCIÓN ARQUITECTÓNICA ---
+
+                admin
+                  .messaging()
+                  .sendEachForMulticast(messagePayload)
+                  .catch((err) =>
+                    console.error(
+                      "[FCM] Error enviando notificación de chat:",
+                      err
+                    )
+                  );
+              }
             }
-            // --- FIN DE LA SOLUCIÓN ARQUITECTÓNICA ---
+          } catch (error) {
+            await client.query("ROLLBACK");
+            throw error;
+          } finally {
+            client.release();
           }
         } catch (error) {
-          console.error("[WS] Error fatal al procesar chat_message:", error);
+          console.error("[WS] Error al procesar chat_message:", error);
         }
         break;
     }
@@ -1269,7 +1287,6 @@ wss.on("connection", (ws) => {
   ws.on("error", (err) => console.error("❌ WebSocket error:", err));
 });
 
-// Ping-pong para mantener conexiones vivas
 setInterval(() => {
   wss.clients.forEach((ws) => {
     if (!ws.isAlive) {
