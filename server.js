@@ -791,10 +791,16 @@ app.get(
   }
 );
 
-// ARQUITECTO: Endpoint de EDICIÓN completamente reescrito para actuar como un proxy robusto y transaccional.
-app.put("/api/publicaciones/:id",
+// En: server.js
+// ARQUITECTO: Reemplaza tu handler PUT /api/publicaciones/:id existente con esta versión corregida.
+
+app.put(
+  "/api/publicaciones/:id",
   authenticateToken,
-  upload.any(), // Usamos upload.any() para que multer no parse el body, solo nos dé acceso a él.
+  // --- INICIO DE LA SOLUCIÓN ---
+  // 1. ELIMINAMOS "upload.any()" de la cadena de middleware.
+  //    Multer ya no intercepteá ni parseará el stream de datos.
+  // --- FIN DE LA SOLUCIÓN ---
   async (req, res) => {
     const userId = req.user.id;
     const postId = req.params.id;
@@ -802,55 +808,73 @@ app.put("/api/publicaciones/:id",
 
     try {
       // --- FASE 1: PROXY DIRECTO DEL STREAM ---
-      // En lugar de reconstruir, transmitimos la petición original directamente a Go.
-      // Esto es más rápido y elimina errores de formato multipart.
       const proxyResponse = await fetch(goBackendUrl, {
-        method: 'PUT',
+        method: "PUT",
         headers: {
-          // Reenviamos las cabeceras originales, incluyendo Content-Type con su boundary.
-          'Content-Type': req.headers['content-type'],
-          'Authorization': req.headers.authorization,
+          "Content-Type": req.headers["content-type"],
+          Authorization: req.headers.authorization,
         },
-        body: req.body // El cuerpo (buffer) es transmitido tal cual.
+        // --- INICIO DE LA SOLUCIÓN ---
+        // 2. Pasamos el objeto "req" (IncomingMessage) directamente como el body.
+        //    "node-fetch" es lo suficientemente inteligente para streamear
+        //    el cuerpo de la petición entrante ("req") al backend de Go.
+        body: req,
+        // --- FIN DE LA SOLUCIÓN ---
       });
 
       const responseData = await proxyResponse.json();
 
-      // Si Go falla al actualizar, detenemos todo aquí. No se cobra nada.
       if (!proxyResponse.ok) {
-        console.error(`[Edición Proxy] Error desde el backend de Go: ${proxyResponse.status}`, responseData.error);
-        return res.status(proxyResponse.status).json({ error: responseData.error || 'El backend de Go rechazó la actualización.' });
-      }
-
-      // --- FASE 2: PROCESAMIENTO DEL PAGO (SOLO SI LA FASE 1 FUE EXITOSA) ---
-      const debitAmount = parseFloat(process.env.COST_POST_EDIT) || 100.0;
-      const debitDescription = `Costo por edición de publicación ID: ${postId}`;
-
-      const debitResponse = await fetch(`${GO_BACKEND_URL}/api/usuarios/debitar-creditos`, {
-        method: 'POST',
-        headers: {
-            'Content-Type': 'application/json',
-            'Authorization': req.headers.authorization,
-        },
-        body: JSON.stringify({ monto: debitAmount, descripcion: debitDescription })
-      });
-
-      if (!debitResponse.ok) {
-        // En este caso improbable, la edición tuvo éxito pero el débito falló.
-        // Esto debe ser monitoreado. Devolvemos la publicación actualizada pero advertimos.
-        console.error(`[Edición PAGO] ¡ALERTA! La publicación ${postId} se actualizó pero el débito falló.`);
-        return res.status(200).json({
-            ...responseData,
-            warning: 'La publicación fue actualizada, pero hubo un problema al procesar el pago.'
+        console.error(
+          `[Edición Proxy] Error desde el backend de Go: ${proxyResponse.status}`,
+          responseData.error
+        );
+        return res.status(proxyResponse.status).json({
+          error:
+            responseData.error || "El backend de Go rechazó la actualización.",
         });
       }
 
-      console.log(`[Edición] Débito de ${debitAmount} exitoso para el usuario ID: ${userId}`);
-      res.status(200).json(responseData);
+      // --- FASE 2: PROCESAMIENTO DEL PAGO (Sin cambios) ---
+      const debitAmount = parseFloat(process.env.COST_POST_EDIT) || 100.0;
+      const debitDescription = `Costo por edición de publicación ID: ${postId}`;
 
+      const debitResponse = await fetch(
+        `${GO_BACKEND_URL}/api/usuarios/debitar-creditos`,
+        {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: req.headers.authorization,
+          },
+          body: JSON.stringify({
+            monto: debitAmount,
+            descripcion: debitDescription,
+          }),
+        }
+      );
+
+      if (!debitResponse.ok) {
+        console.error(
+          `[Edición PAGO] ¡ALERTA! La publicación ${postId} se actualizó pero el débito falló.`
+        );
+        return res.status(200).json({
+          ...responseData,
+          warning:
+            "La publicación fue actualizada, pero hubo un problema al procesar el pago.",
+        });
+      }
+
+      console.log(
+        `[Edición] Débito de ${debitAmount} exitoso para el usuario ID: ${userId}`
+      );
+      res.status(200).json(responseData);
     } catch (error) {
+      // Este catch ahora manejará errores de 'node-fetch' si el stream se rompe.
       console.error("[Edición] Error en el proxy de actualización:", error);
-      res.status(500).json({ error: "Error interno del servidor al procesar la edición." });
+      res.status(500).json({
+        error: "Error interno del servidor al procesar la edición.",
+      });
     }
   }
 );
