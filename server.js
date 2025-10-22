@@ -791,8 +791,6 @@ app.get(
   }
 );
 
-// ... (Aquí continúan tus otros endpoints, como /api/promociones/enviar)promociones/enviar
-// Endpoint 1: Obtener la lista de usuarios interesados en una publicación
 // ARQUITECTO: Endpoint de EDICIÓN completamente reescrito para actuar como un proxy robusto y transaccional.
 app.put("/api/publicaciones/:id",
   authenticateToken,
@@ -856,9 +854,6 @@ app.put("/api/publicaciones/:id",
     }
   }
 );
-
-// ARQUITECTO: Reemplaza tu endpoint existente con esta versión completa y robusta.
-// En tu server.js, reemplaza por completo el endpoint /api/promociones/enviar
 
 app.post("/api/promociones/enviar", authenticateToken, async (req, res) => {
   const sender = req.user; // { id, nombre }
@@ -1035,86 +1030,7 @@ app.post("/api/promociones/enviar", authenticateToken, async (req, res) => {
 });
 
 
-// ARQUITECTO: Endpoint de EDICIÓN completamente reescrito
-app.put("/api/publicaciones/:id", 
-  authenticateToken, 
-  upload.array('images', 3), // Usamos el middleware de multer aquí. 'images' debe coincidir con el nombre del campo en el FormData del cliente.
-  async (req, res) => {
-  
-  const userId = req.user.id;
-  const postId = req.params.id;
 
-  // --- FASE 1: PROCESAMIENTO DEL PAGO (sin cambios, ya funciona) ---
-  try {
-      const debitAmount = parseFloat(process.env.COST_POST_EDIT) || 100.0;
-      const debitDescription = `Costo por edición de publicación ID: ${postId}`;
-
-      const debitResponse = await fetch(`${GO_BACKEND_URL}/api/usuarios/debitar-creditos`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json', 'Authorization': req.headers.authorization },
-          body: JSON.stringify({ monto: debitAmount, descripcion: debitDescription })
-      });
-
-      if (debitResponse.status === 402) {
-          return res.status(402).json({ error: 'Créditos insuficientes para editar.' });
-      }
-      if (!debitResponse.ok) {
-          const errorData = await debitResponse.json();
-          throw new Error(errorData.error || 'Fallo en el sistema de créditos.');
-      }
-      console.log(`[Edición] Débito de ${debitAmount} exitoso para el usuario ID: ${userId}`);
-  } catch (error) {
-      console.error("[Edición] Error durante el débito:", error);
-      return res.status(500).json({ error: error.message || "Error al procesar el pago." });
-  }
-
-  // --- FASE 2: RECONSTRUCCIÓN Y ENVÍO DEL FORMDATA A GO ---
-  try {
-      // ARQUITECTO: Creamos un nuevo FormData para reenviar los datos.
-      const formData = new FormData();
-
-      // 1. Añadimos los campos de texto que multer ha parseado en req.body
-      formData.append('titulo', req.body.titulo);
-      formData.append('descripcion', req.body.descripcion);
-      formData.append('category', req.body.category);
-      formData.append('tags', req.body.tags); // Asumiendo que las tags vienen como un string JSON
-
-      // 2. Añadimos los archivos (si los hay) que multer ha puesto en req.files
-      if (req.files && req.files.length > 0) {
-          req.files.forEach(file => {
-              // Usamos el buffer del archivo en memoria.
-              formData.append('images', file.buffer, { filename: file.originalname });
-          });
-      }
-      
-      // 3. Reenviamos la petición a Go, esta vez como multipart/form-data
-      const updateResponse = await fetch(`${GO_BACKEND_URL}/api/publicaciones/${postId}`, {
-          method: 'PUT',
-          headers: {
-              // ARQUITECTO: ¡Crucial! Dejamos que node-fetch establezca el Content-Type y el boundary por nosotros.
-              // No lo definimos manualmente.
-              ...formData.getHeaders(),
-              'Authorization': req.headers.authorization
-          },
-          body: formData
-      });
-
-      if (!updateResponse.ok) {
-          const errorData = await updateResponse.json();
-          throw new Error(errorData.error || 'El pago fue exitoso, pero la actualización falló.');
-      }
-
-      const updateData = await updateResponse.json();
-      res.status(200).json(updateData);
-
-  } catch (error) {
-      console.error("[Edición] Error en fase de actualización:", error);
-      res.status(500).json({ error: error.message });
-  }
-});
-
-
-// En tu server.js (Render)
 
 app.delete("/api/notifications/:id", authenticateToken, async (req, res) => {
   const userId = req.user.id;
