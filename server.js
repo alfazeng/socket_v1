@@ -489,7 +489,6 @@ app.put("/api/notifications/mark-read/:id", authenticateToken, async (req, res) 
 // =================================================================================
 // --- ENDPOINT DEL CERBOT (MODIFICADO) ---
 // =================================================================================
-// ARQUITECTO: Endpoint /api/cerbot/message con validación de estado del Cerbot.
 app.post("/api/cerbot/message", authenticateToken, async (req, res) => {
   const { sellerId, message, sessionId } = req.body;
   const askingUserId = req.user.id;
@@ -564,8 +563,9 @@ app.post("/api/cerbot/message", authenticateToken, async (req, res) => {
     }
 
     // FASE 2: PROCESAR EL PAGO (SOLO SI LA IA RESPONDIÓ Y NO ES MODO PRUEBA)
-    const debitAmount = parseFloat(process.env.COST_CERBOT_RESPONSE) || 2.0;
-    const debitDescription = `Costo por respuesta de Cerbot (al usuario ID: ${askingUserId})`;
+    const debitAmount = parseFloat(process.env.POINTS_CERBOT_RESPONSE) || 2.0;
+   
+    const debitDescription = `Puntos usados por respuesta de Cerbot (a usuario ID: ${askingUserId})`;
 
     const debitResponse = await fetch(
       `${GO_BACKEND_URL}/api/usuarios/debitar-creditos`,
@@ -600,7 +600,7 @@ app.post("/api/cerbot/message", authenticateToken, async (req, res) => {
       );
       return res.json({
         botResponse,
-        warning: "Hubo un problema al procesar el costo de esta respuesta.",
+        warning: "Hubo un problema al procesar el valor de esta respuesta.",
       });
     }
 
@@ -809,8 +809,9 @@ app.put(
     try {
       // --- INICIO DE LA SOLUCIÓN ARQUITECTÓNICA ---
       // --- FASE 1: PROCESAMIENTO DEL PAGO (Cobrar primero) ---
-      const debitAmount = parseFloat(process.env.COST_POST_EDIT) || 100.0;
-      const debitDescription = `Costo por edición de publicación ID: ${postId}`;
+      const debitAmount = parseFloat(process.env.POINTS_POST_EDIT) || 100.0;
+      
+      const debitDescription = `Puntos usados por editar publicación ID: ${postId}`;
 
       const debitResponse = await fetch(
         `${GO_BACKEND_URL}/api/usuarios/debitar-creditos`,
@@ -839,12 +840,10 @@ app.put(
           }`
         );
         // Devolvemos el error 402 (Payment Required) o el que sea que Go nos dio.
-        return res
-          .status(debitResponse.status)
-          .json({
-            error:
-              errorData.error || "No se pudo procesar el pago de la edición.",
-          });
+        return res.status(debitResponse.status).json({
+          error:
+            errorData.error || "No se pudo procesar el pago de la edición.",
+        });
       }
 
       console.log(
@@ -872,15 +871,13 @@ app.put(
         console.error(
           `[Edición Proxy] ¡ALERTA CRÍTICA! Se cobró al usuario ${userId} pero la edición falló. Se necesita REEMBOLSO.`
         );
-        return res
-          .status(proxyResponse.status)
-          .json({
-            error:
-              responseData.error ||
-              "El backend de Go rechazó la actualización (post-pago).",
-            warning:
-              "Se ha cobrado la edición pero la actualización falló. Contacta a soporte.",
-          });
+        return res.status(proxyResponse.status).json({
+          error:
+            responseData.error ||
+            "El backend de Go rechazó la actualización (post-pago).",
+          warning:
+            "Se ha cobrado la edición pero la actualización falló. Contacta a soporte.",
+        });
       }
 
       console.log(
@@ -916,9 +913,10 @@ app.post("/api/promociones/enviar", authenticateToken, async (req, res) => {
   }
 
   // --- FASE 1: PROCESAMIENTO DEL PAGO (Sin cambios) ---
-  const costPerUser = parseFloat(process.env.COST_PROMOTION_PER_USER) || 10.0;
+  const costPerUser = parseFloat(process.env.POINTS_PROMOTION_PER_USER) || 10.0;
   const costoTotal = costPerUser * recipientIds.length;
-  const debitDescription = `Costo por campaña a ${recipientIds.length} usuarios (publicación ID: ${publicationId})`;
+  
+  const debitDescription = `Puntos usados por campaña a ${recipientIds.length} usuarios (publicación ID: ${publicationId})`;
 
   try {
     const debitResponse = await fetch(
@@ -954,7 +952,9 @@ app.post("/api/promociones/enviar", authenticateToken, async (req, res) => {
     console.error("[Promociones] Error durante el proceso de débito:", error);
     return res
       .status(500)
-      .json({ error: error.message || "Error al procesar el pago de créditos." });
+      .json({
+        error: error.message || "Error al procesar el pago de créditos.",
+      });
   }
 
   // --- FASE 2: ENTREGA DEL SERVICIO (CON LÓGICA 'AWAIT' CORREGIDA) ---
@@ -978,7 +978,7 @@ app.post("/api/promociones/enviar", authenticateToken, async (req, res) => {
 
     const notificationTitle = `📢 Nueva promoción de ${sender.nombre}`;
     const notificationUrl = `/publicacion/${publicationId}`;
-    
+
     const onlineUserIds = [];
     const offlineUserIds = [];
 
@@ -997,10 +997,7 @@ app.post("/api/promociones/enviar", authenticateToken, async (req, res) => {
       const newNotification = result.rows[0];
 
       const recipientSocket = clients.get(String(userId));
-      if (
-        recipientSocket &&
-        recipientSocket.readyState === WebSocket.OPEN
-      ) {
+      if (recipientSocket && recipientSocket.readyState === WebSocket.OPEN) {
         recipientSocket.send(
           JSON.stringify({
             type: "new_notification",
@@ -1012,7 +1009,7 @@ app.post("/api/promociones/enviar", authenticateToken, async (req, res) => {
         offlineUserIds.push(userId);
       }
     }
-    
+
     let fcmSuccessCount = 0;
     let fcmFailureCount = 0;
 
@@ -1037,11 +1034,13 @@ app.post("/api/promociones/enviar", authenticateToken, async (req, res) => {
             senderId: String(sender.id),
           },
         };
-        
+
         // --- INICIO DE LA SOLUCIÓN ARQUITECTÓNICA ---
         // Se añade 'await' para asegurar que el envío se complete antes de continuar.
         // Se captura la respuesta para un logging más preciso.
-        const fcmResponse = await admin.messaging().sendEachForMulticast(messagePayload);
+        const fcmResponse = await admin
+          .messaging()
+          .sendEachForMulticast(messagePayload);
         fcmSuccessCount = fcmResponse.successCount;
         fcmFailureCount = fcmResponse.failureCount;
         console.log(
@@ -1252,3 +1251,5 @@ setInterval(() => {
 server.listen(PORT, () => {
   console.log(`🚀 Servidor WebSocket y API escuchando en el puerto: ${PORT}`);
 });
+
+
